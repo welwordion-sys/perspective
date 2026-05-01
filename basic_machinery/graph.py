@@ -1,3 +1,4 @@
+from __future__ import annotations
 from enum import Enum, auto
 from dataclasses import dataclass, field
 
@@ -36,14 +37,16 @@ class PerspectiveGraph:
     def remove_node(self, node: Node) -> None:
         if node not in self._nodes:
             raise ValueError(f"Node {node} not in graph.")
-        self._edges = {e for e in self._edges if e.source != node and e.target != node}
+        self._edges = {e for e in self._edges if e.source !=
+                       node and e.target != node}
         self._nodes.discard(node)
 
     # --- Edge management ---
 
     def add_edge(self, source: Node, target: Node, edge_type: EdgeType) -> Edge:
         if source not in self._nodes or target not in self._nodes:
-            raise ValueError("Both nodes must exist in the graph before adding an edge.")
+            raise ValueError(
+                "Both nodes must exist in the graph before adding an edge.")
         edge = Edge(source=source, target=target, edge_type=edge_type)
         if edge in self._edges:
             raise ValueError(f"Edge {edge} already exists.")
@@ -98,6 +101,6 @@ class PerspectiveGraph:
         return f"PerspectiveGraph(nodes={len(self._nodes)}, edges={len(self._edges)})"
 
     def restore(self, snap: PerspectiveGraph) -> None:
- 	self._nodes = set(snap._nodes)
-    	self._edges = set(snap._edges)
-    	self._next_id = snap._next_id
+        self._nodes = set(snap._nodes)
+        self._edges = set(snap._edges)
+        self._next_id = snap._next_id

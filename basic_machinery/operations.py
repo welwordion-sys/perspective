@@ -22,7 +22,8 @@ _registry: dict[str, OperationDefinition] = {}
 
 def register(operation: OperationDefinition) -> None:
     if operation.name in _registry:
-        raise ValueError(f"Operation '{operation.name}' is already registered.")
+        raise ValueError(
+            f"Operation '{operation.name}' is already registered.")
     _registry[operation.name] = operation
 
 
