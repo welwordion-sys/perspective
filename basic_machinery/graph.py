@@ -96,3 +96,8 @@ class PerspectiveGraph:
 
     def __repr__(self) -> str:
         return f"PerspectiveGraph(nodes={len(self._nodes)}, edges={len(self._edges)})"
+
+    def restore(self, snap: PerspectiveGraph) -> None:
+ 	self._nodes = set(snap._nodes)
+    	self._edges = set(snap._edges)
+    	self._next_id = snap._next_id
