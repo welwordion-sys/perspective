@@ -95,5 +95,4 @@ class PerspectiveGraph:
         return False
 
     def __repr__(self) -> str:
-
-return f"PerspectiveGraph(nodes={len(self._nodes)}, edges={len(self._edges)})"
+        return f"PerspectiveGraph(nodes={len(self._nodes)}, edges={len(self._edges)})"
