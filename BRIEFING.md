@@ -1,5 +1,5 @@
 # Perspective — Mobile Session Briefing
-**Updated:** 2026-05-02 | **Next task:** P2 — Input Layer and Encoding
+**Updated:** 2026-05-03 | **Next task:** P2 — Input Layer and Encoding (implementation)
 
 ---
 
@@ -29,11 +29,35 @@ Representation Space Traversal AI — a system that solves problems by traversin
 
 **Goal:** Encode arithmetic expressions and linear equations as directed graphs.
 
-**Encoding decisions:**
-- Each constant (e.g. `3`, `4`, `10`) encoded as a binary tree rooted at its node — no node attributes, identity emerges from structure
-- Operators (`+`, `-`, `*`, `/`) and equality (`=`) as internal nodes
-- Variable `x` as anonymous structural node — no special status
-- Input layer is immutable — no rules fire on it
+**Encoding decisions (design complete, implementation pending):**
+
+**Numbers:**
+- Minimal binary trees, open-length — depth determined by the number, no fixed bitwidth, no padding
+- Each number has exactly one structural representation
+- Internal edges are structural
+
+**Operators (`+`, `-`, `*`, `/`):**
+- Internal nodes with distinct arbitrary structural shapes — no node typing
+- Connect to operand subtree roots via operational edges
+- Four initial operators; new operators added as needed with new distinct shapes
+
+**Equality (`=`):**
+- Root node of equation expression tree
+- Distinct structural shape from arithmetic operators
+
+**Variable `x`:**
+- Anonymous structural node, distinct shape
+- Belongs to parameter structural family (separate from operand family)
+- No special rule treatment — arithmetic rules simply don't match it
+
+**Expression tree structure:**
+- Operators as internal nodes, numbers/variables as leaves
+- Tree topology encodes evaluation order — deeper nodes resolve first
+- No explicit bracket nodes needed
+
+**Carry propagation:**
+- Operational edge from operator to current bit position acts as cursor
+- Rule detaches and reattaches edge to next bit node — no extra marker node
 
 **Label format:**
 - Pure arithmetic (e.g. `3 + 4`): label is terminal value node — `7`. No wrapper.
@@ -52,6 +76,9 @@ Representation Space Traversal AI — a system that solves problems by traversin
 - Displacement by library-informed rules is the success signal
 - If seed rules dominate after N generations, library accumulation is broken
 
+**Open design question for implementation start:**
+- Concrete structural shapes for operator nodes, parameter nodes, and carry marker
+
 **Exit condition:** Expressions reliably converted to base graphs. Sample manually inspected and encoding confirmed sane.
 
 ---
@@ -67,6 +94,16 @@ Representation Space Traversal AI — a system that solves problems by traversin
 **Reversibility:** Every rule firing is reversible. Rule path is the inverse map. The pair (result graph + rule path) is the full reversible state.
 
 **Substrate:** Directed graphs, binary edge types only (structural / operational). No node attributes, no weights, no hyperedges in base prototype.
+
+**Graph rewrite rule representation:**
+- Two-graph schema: Graph 1 (mixed edge types, for matching) + Graph 2 (single edge type, for transition)
+- Rule firing: (1) match Graph 1, (2) strip one edge type, (3) apply Graph 2, (4) reattach stripped edges via node mapping
+- Operational edges serve as node pointers in rules; when input is operational, structural edges take the pointer role (role swap at interpreter level)
+- GA operates on each graph independently — no pairing complexity
+
+**Layer types:**
+- Within-layer transformation: switches representation without changing abstraction level (e.g. `3+4 → 7`)
+- Layer transition: changes abstraction level — collapses local detail into higher-level structure
 
 **P6 gate (future):** Binary decision — directed graph sufficient (pass) or hyperedges needed (fail). Fail is additive — directed graph is hypergraph at k=2, everything recycles.
 
@@ -98,4 +135,4 @@ Representation Space Traversal AI — a system that solves problems by traversin
 
 ## Next session start prompt
 Paste this file and add:
-> "No GitHub access. Mobile session. Current task: P2 input encoding. [your question or task]"
+> "No GitHub access. Mobile session. Current task: P2 implementation. [your question or task]"
