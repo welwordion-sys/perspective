@@ -104,6 +104,7 @@ class PerspectiveGraph:
         self._nodes = set(snap._nodes)
         self._edges = set(snap._edges)
         self._next_id = snap._next_id
+
     def subgraph(self, nodes: set[Node]) -> "PerspectiveGraph":
         """
         Return a new graph containing only the given nodes
