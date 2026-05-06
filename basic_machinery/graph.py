@@ -106,16 +106,16 @@ class PerspectiveGraph:
         self._next_id = snap._next_id
 
 
-def subgraph(self, nodes: set[Node]) -> "PerspectiveGraph":
-    """
-    Return a new graph containing only the given nodes
-    and any edges between them. Node IDs are preserved.
-    """
-    g = PerspectiveGraph()
-    g._nodes = set(nodes)
-    g._edges = {
-        e for e in self._edges
-        if e.source in nodes and e.target in nodes
-    }
-    g._next_id = self._next_id
-    return g
+    def subgraph(self, nodes: set[Node]) -> "PerspectiveGraph":
+        """
+        Return a new graph containing only the given nodes
+        and any edges between them. Node IDs are preserved.
+        """
+        g = PerspectiveGraph()
+        g._nodes = set(nodes)
+        g._edges = {
+            e for e in self._edges
+            if e.source in nodes and e.target in nodes
+        }
+        g._next_id = self._next_id
+        return g
