@@ -37,8 +37,7 @@ class PerspectiveGraph:
     def remove_node(self, node: Node) -> None:
         if node not in self._nodes:
             raise ValueError(f"Node {node} not in graph.")
-        self._edges = {e for e in self._edges if e.source !=
-                       node and e.target != node}
+        self._edges = {e for e in self._edges if e.source != node and e.target != node}
         self._nodes.discard(node)
 
     # --- Edge management ---
@@ -83,12 +82,31 @@ class PerspectiveGraph:
     def neighbors(self, node: Node, edge_type: EdgeType | None = None) -> list[Node]:
         return [e.target for e in self.edges_from(node, edge_type)]
 
+    def subgraph(self, nodes: set[Node]) -> "PerspectiveGraph":
+        """
+        Return a new graph containing only the given nodes
+        and any edges between them. Node IDs are preserved.
+        """
+        g = PerspectiveGraph()
+        g._nodes = set(nodes)
+        g._edges = {
+            e for e in self._edges
+            if e.source in nodes and e.target in nodes
+        }
+        g._next_id = self._next_id
+        return g
+
     def copy(self) -> "PerspectiveGraph":
         g = PerspectiveGraph()
         g._nodes = set(self._nodes)
         g._edges = set(self._edges)
         g._next_id = self._next_id
         return g
+
+    def restore(self, snap: "PerspectiveGraph") -> None:
+        self._nodes = set(snap._nodes)
+        self._edges = set(snap._edges)
+        self._next_id = snap._next_id
 
     def __contains__(self, item) -> bool:
         if isinstance(item, Node):
@@ -99,22 +117,3 @@ class PerspectiveGraph:
 
     def __repr__(self) -> str:
         return f"PerspectiveGraph(nodes={len(self._nodes)}, edges={len(self._edges)})"
-
-    def restore(self, snap: PerspectiveGraph) -> None:
-        self._nodes = set(snap._nodes)
-        self._edges = set(snap._edges)
-        self._next_id = snap._next_id
-
-    def subgraph(self, nodes: set[Node]) -> "PerspectiveGraph":
-        """
-        Return a new graph containing only the given nodes
-        and any edges between them. Node IDs are preserved.
-        """
-        g = PerspectiveGraph()
-        g._nodes = set(nodes)
-        g._edges = {
-        e for e in self._edges
-        if e.source in nodes and e.target in nodes
-        }
-        g._next_id = self._next_id
-        return g
