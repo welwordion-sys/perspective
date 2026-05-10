@@ -1,527 +1,426 @@
 from __future__ import annotations
 from basic_machinery.graph import PerspectiveGraph, Node, EdgeType
-from basic_machinery.operations import OperationDefinition, MatchResult, register
+from basic_machinery.operations import OperationDefinition, register
 
 
 # ---------------------------------------------------------------------------
-# Carry marker helpers — 2-cycle attached via structural edge from op node
+# Pattern building helpers
 # ---------------------------------------------------------------------------
 
-def _build_carry_marker(graph: PerspectiveGraph, op_node: Node) -> None:
-    a = graph.add_node()
-    b = graph.add_node()
-    graph.add_edge(a, b, EdgeType.STRUCTURAL)
-    graph.add_edge(b, a, EdgeType.STRUCTURAL)
-    graph.add_edge(op_node, a, EdgeType.STRUCTURAL)
-
-
-def _has_carry(graph: PerspectiveGraph, op_node: Node) -> bool:
-    for e in graph.edges_from(op_node, EdgeType.STRUCTURAL):
-        candidate = e.target
-        if candidate == op_node:
-            continue
-        out = graph.edges_from(candidate, EdgeType.STRUCTURAL)
-        if len(out) == 1 and out[0].target != candidate:
-            partner = out[0].target
-            back = graph.edges_from(partner, EdgeType.STRUCTURAL)
-            if len(back) == 1 and back[0].target == candidate:
-                return True
-    return False
-
-
-def _remove_carry_marker(graph: PerspectiveGraph, op_node: Node) -> None:
-    for e in graph.edges_from(op_node, EdgeType.STRUCTURAL):
-        candidate = e.target
-        if candidate == op_node:
-            continue
-        out = graph.edges_from(candidate, EdgeType.STRUCTURAL)
-        if len(out) == 1 and out[0].target != candidate:
-            partner = out[0].target
-            back = graph.edges_from(partner, EdgeType.STRUCTURAL)
-            if len(back) == 1 and back[0].target == candidate:
-                graph.remove_edge(e)
-                graph.remove_node(candidate)
-                graph.remove_node(partner)
-                return
-
-
-# ---------------------------------------------------------------------------
-# Tombstone helpers — 3-node chain: node -> a -> b (no cycles, no self-loops)
-# ---------------------------------------------------------------------------
-
-def _build_tombstone(graph: PerspectiveGraph, target: Node) -> None:
-    a = graph.add_node()
-    b = graph.add_node()
-    graph.add_edge(a, b, EdgeType.STRUCTURAL)
-    graph.add_edge(target, a, EdgeType.STRUCTURAL)
-
-
-def _find_tombstone_chain(
-    graph: PerspectiveGraph, node: Node
-) -> tuple[Node, Node] | None:
-    """
-    Return (a, b) if node has a tombstone chain node->a->b attached,
-    where a and b are plain nodes with no other structural edges.
-    Returns None if no tombstone found.
-    """
-    for e in graph.edges_from(node, EdgeType.STRUCTURAL):
-        a = e.target
-        if a == node:
-            continue
-        a_out = graph.edges_from(a, EdgeType.STRUCTURAL)
-        if len(a_out) == 1:
-            b = a_out[0].target
-            if b == a or b == node:
-                continue
-            b_out = graph.edges_from(b, EdgeType.STRUCTURAL)
-            if len(b_out) == 0:
-                return a, b
-    return None
-
-
-def _is_tombstoned(graph: PerspectiveGraph, node: Node) -> bool:
-    return _find_tombstone_chain(graph, node) is not None
-
-
-def _remove_tombstone(graph: PerspectiveGraph, node: Node) -> None:
-    chain = _find_tombstone_chain(graph, node)
-    if chain is None:
-        return
-    a, b = chain
-    tomb_edge = next(
-        e for e in graph.edges_from(node, EdgeType.STRUCTURAL)
-        if e.target == a
-    )
-    graph.remove_edge(tomb_edge)
-    graph.remove_node(b)
-    graph.remove_node(a)
-
-
-# ---------------------------------------------------------------------------
-# Bit node helpers
-# ---------------------------------------------------------------------------
-
-def _is_empty_node(graph: PerspectiveGraph, node: Node) -> bool:
-    return len(graph.edges_from(node, EdgeType.STRUCTURAL)) == 0
-
-
-def _is_one_node(graph: PerspectiveGraph, node: Node) -> bool:
-    edges = graph.edges_from(node, EdgeType.STRUCTURAL)
-    return len(edges) == 1 and edges[0].target == node
-
-
-# ---------------------------------------------------------------------------
-# Operator node helpers
-# ---------------------------------------------------------------------------
-
-def _is_n_cycle_start(graph: PerspectiveGraph, node: Node, n: int) -> bool:
-    current = node
-    for _ in range(n):
-        edges = graph.edges_from(current, EdgeType.STRUCTURAL)
-        if len(edges) != 1:
-            return False
-        current = edges[0].target
-    return current == node
-
-
-def _find_plus_node(graph: PerspectiveGraph, result: MatchResult) -> Node | None:
-    for mapped in result.node_map.values():
-        for e in graph.edges_from(mapped, EdgeType.STRUCTURAL):
-            if e.target == mapped:
-                continue
-            if _is_n_cycle_start(graph, e.target, 3):
-                return mapped
-    return None
-
-
-# ---------------------------------------------------------------------------
-# Tree traversal helpers
-# ---------------------------------------------------------------------------
-
-def _find_deepest_right_leaf(graph: PerspectiveGraph, root: Node) -> Node:
-    """
-    Walk structural children toward the deepest right leaf (LSB).
-    Right child = second structural child (non-self-loop).
-    Leaf = node with no non-self-loop structural children.
-    """
-    current = root
-    while True:
-        children = [
-            e.target for e in graph.edges_from(current, EdgeType.STRUCTURAL)
-            if e.target != current
-        ]
-        if not children:
-            return current
-        # Right child is index 1 if two children, index 0 if one
-        current = children[1] if len(children) >= 2 else children[0]
-
-
-def _get_parent(graph: PerspectiveGraph, node: Node) -> Node | None:
-    """
-    Return the parent of node in the binary tree — the node with a
-    structural edge to this node, excluding self-loops.
-    """
-    parents = [
-        e.source for e in graph.edges_to(node, EdgeType.STRUCTURAL)
-        if e.source != node
-    ]
-    return parents[0] if parents else None
-
-
-# ---------------------------------------------------------------------------
-# Position edge helpers
-# ---------------------------------------------------------------------------
-
-def _get_position_nodes(
-    graph: PerspectiveGraph, op_node: Node
-) -> tuple[Node, Node] | None:
-    """
-    Return (left_pos, right_pos) — operational edges 3 and 4 from op_node.
-    Returns None if fewer than 4 operational edges exist.
-    """
-    op_edges = graph.edges_from(op_node, EdgeType.OPERATIONAL)
-    if len(op_edges) < 4:
-        return None
-    return op_edges[2].target, op_edges[3].target
-
-
-def _advance_position(
-    graph: PerspectiveGraph, op_node: Node, pos_node: Node
-) -> None:
-    """
-    Move position edge from pos_node to its parent.
-    If no parent (pos_node is root / MSB), remove edge — signals exhaustion.
-    """
-    pos_edge = next(
-        e for e in graph.edges_from(op_node, EdgeType.OPERATIONAL)
-        if e.target == pos_node
-    )
-    graph.remove_edge(pos_edge)
-    parent = _get_parent(graph, pos_node)
-    if parent is not None:
-        graph.add_edge(op_node, parent, EdgeType.OPERATIONAL)
-
-
-# ---------------------------------------------------------------------------
-# Result tree helpers
-# ---------------------------------------------------------------------------
-
-def _get_operand_roots(graph: PerspectiveGraph, op_node: Node) -> tuple[Node, Node]:
-    op_edges = graph.edges_from(op_node, EdgeType.OPERATIONAL)
-    return op_edges[0].target, op_edges[1].target
-
-
-def _in_operand_trees(
-    graph: PerspectiveGraph, op_node: Node, target: Node
-) -> bool:
-    left_root, right_root = _get_operand_roots(graph, op_node)
-    visited: set[Node] = set()
-    stack = [left_root, right_root]
-    while stack:
-        node = stack.pop()
-        if node == target:
-            return True
-        if node in visited:
-            continue
-        visited.add(node)
-        for e in graph.edges_from(node, EdgeType.STRUCTURAL):
-            stack.append(e.target)
-    return False
-
-
-def _get_result_root(graph: PerspectiveGraph, op_node: Node) -> Node | None:
-    op_edges = graph.edges_from(op_node, EdgeType.OPERATIONAL)
-    for e in op_edges:
-        if not _in_operand_trees(graph, op_node, e.target):
-            return e.target
-    return None
-
-
-def _append_result_bit(
-    graph: PerspectiveGraph, op_node: Node, bit: int
-) -> None:
-    """
-    Append a result bit to the result tree.
-    New bit node becomes new result root; previous root becomes its left child.
-    Result tree grows MSB-toward-root as bits are appended LSB-first.
-    """
-    new_bit = graph.add_node()
-    if bit == 1:
-        graph.add_edge(new_bit, new_bit, EdgeType.STRUCTURAL)
-
-    prev_root = _get_result_root(graph, op_node)
-    if prev_root is not None:
-        # Remove old result edge, attach new bit as new root
-        old_edge = next(
-            e for e in graph.edges_from(op_node, EdgeType.OPERATIONAL)
-            if e.target == prev_root
-        )
-        graph.remove_edge(old_edge)
-        graph.add_edge(new_bit, prev_root, EdgeType.STRUCTURAL)
-
-    graph.add_edge(op_node, new_bit, EdgeType.OPERATIONAL)
-
-
-# ---------------------------------------------------------------------------
-# Core bit step
-# ---------------------------------------------------------------------------
-
-def _bit_step(
-    graph: PerspectiveGraph,
-    op_node: Node,
-    left_pos: Node,
-    right_pos: Node,
-    carry_in: bool,
-) -> None:
-    left_bit = 1 if _is_one_node(graph, left_pos) else 0
-    right_bit = 1 if _is_one_node(graph, right_pos) else 0
-    total = left_bit + right_bit + (1 if carry_in else 0)
-    result_bit = total % 2
-    carry_out = total >= 2
-
-    _append_result_bit(graph, op_node, result_bit)
-    _advance_position(graph, op_node, left_pos)
-    _advance_position(graph, op_node, right_pos)
-
-    if carry_out and not carry_in:
-        _build_carry_marker(graph, op_node)
-    elif not carry_in and not carry_out:
-        pass  # no change
-    elif carry_in and not carry_out:
-        _remove_carry_marker(graph, op_node)
-    # carry_in and carry_out: marker stays, no change needed
-
-
-# ---------------------------------------------------------------------------
-# add_init
-# ---------------------------------------------------------------------------
-
-def _add_init_rewrite(graph: PerspectiveGraph, result: MatchResult) -> None:
-    op_node = _find_plus_node(graph, result)
-    if op_node is None:
-        return
-    # Only fire if exactly two operational edges — not yet initialised
-    if len(graph.edges_from(op_node, EdgeType.OPERATIONAL)) != 2:
-        return
-
-    left_root, right_root = _get_operand_roots(graph, op_node)
-    left_lsb = _find_deepest_right_leaf(graph, left_root)
-    right_lsb = _find_deepest_right_leaf(graph, right_root)
-
-    graph.add_edge(op_node, left_lsb, EdgeType.OPERATIONAL)
-    graph.add_edge(op_node, right_lsb, EdgeType.OPERATIONAL)
-
-
-# ---------------------------------------------------------------------------
-# Bit rules
-# ---------------------------------------------------------------------------
-
-def _make_plus_pattern() -> PerspectiveGraph:
+def _add_op_node(p: PerspectiveGraph) -> Node:
+    """Add an unfinished + operator node (3-cycle + anchor) to pattern graph."""
     from basic_machinery.encoding import build_operator
+    return build_operator(p, '+', finished=False)
+
+
+def _add_bit_zero(p: PerspectiveGraph) -> Node:
+    """Add an empty (zero) bit node to pattern graph."""
+    return p.add_node()  # empty — no structural edges
+
+
+def _add_bit_one(p: PerspectiveGraph) -> Node:
+    """Add a self-loop (one) bit node to pattern graph."""
+    node = p.add_node()
+    p.add_edge(node, node, EdgeType.STRUCTURAL)
+    return node
+
+
+def _add_parent(p: PerspectiveGraph, child: Node) -> Node:
+    """
+    Add a parent node connected to child via structural edge.
+    Encodes the position advance target — parent is where the
+    position cursor moves after this bit step.
+    """
+    parent = p.add_node()
+    p.add_edge(parent, child, EdgeType.STRUCTURAL)
+    return parent
+
+
+def _add_carry(p: PerspectiveGraph, result_node: Node) -> tuple[Node, Node]:
+    """
+    Add a carry marker 2-cycle to pattern graph, attached to result_node
+    via an operational edge from result_node to one cycle node.
+    Returns (cycle_a, cycle_b) where result_node -OPER-> cycle_a -STRUCT-> cycle_b -STRUCT-> cycle_a.
+    """
+    cycle_a = p.add_node()
+    cycle_b = p.add_node()
+    p.add_edge(result_node, cycle_a, EdgeType.OPERATIONAL)
+    p.add_edge(cycle_a, cycle_b, EdgeType.STRUCTURAL)
+    p.add_edge(cycle_b, cycle_a, EdgeType.STRUCTURAL)
+    return cycle_a, cycle_b
+
+
+def _add_result_node(p: PerspectiveGraph, op_node: Node) -> Node:
+    """
+    Add a result accumulator node connected to op_node via operational edge.
+    The result node is the current leaf of the growing result tree.
+    """
+    result = p.add_node()
+    p.add_edge(op_node, result, EdgeType.OPERATIONAL)
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Transition graph helpers
+# ---------------------------------------------------------------------------
+
+def _make_advance_graph2o(
+    left_parent: Node,
+    right_parent: Node,
+    result_node: Node,
+    op_node: Node,
+    add_carry: bool,
+) -> PerspectiveGraph:
+    """
+    Build graph2o for a bit rule.
+    Strips structural edges, outputs operational edges:
+    - op_node -> left_parent  (position advances to parent)
+    - op_node -> right_parent
+    - op_node -> result_node  (result edge preserved)
+    - result_node -> carry_a  (only if add_carry=True)
+
+    All nodes referenced here must already exist in the pattern graph
+    so the node_map can resolve them.
+    """
+    g = PerspectiveGraph()
+    # Nodes in graph2o must mirror the pattern nodes that survive.
+    # We build a minimal graph referencing only the nodes we need.
+    # _apply_pass matches input nodes (those with outgoing strip-type edges
+    # in the transition) against the post-strip subgraph, then follows
+    # strip-type (structural) edges to build the output node map.
+    # Since we want to output operational edges, graph2o's strip_type=STRUCTURAL.
+    # Input nodes in graph2o = nodes with outgoing STRUCTURAL edges in graph2o.
+    # We add no structural edges here — all nodes are isolated input nodes,
+    # each mapping to their counterpart in the node_map from graph2s.
+    # Operational edges between them are then written into the target graph.
+
+    g_op = g.add_node()       # maps to op_node
+    g_left = g.add_node()     # maps to left_parent
+    g_right = g.add_node()    # maps to right_parent
+    g_result = g.add_node()   # maps to result_node
+
+    g.add_edge(g_op, g_left, EdgeType.OPERATIONAL)
+    g.add_edge(g_op, g_right, EdgeType.OPERATIONAL)
+    g.add_edge(g_op, g_result, EdgeType.OPERATIONAL)
+
+    if add_carry:
+        g_carry_a = g.add_node()
+        g_carry_b = g.add_node()
+        g.add_edge(g_result, g_carry_a, EdgeType.OPERATIONAL)
+        g.add_edge(g_carry_a, g_carry_b, EdgeType.STRUCTURAL)
+        g.add_edge(g_carry_b, g_carry_a, EdgeType.STRUCTURAL)
+
+    return g
+
+
+# ---------------------------------------------------------------------------
+# add_init rules (4 rules — first bit step, no result node yet)
+# ---------------------------------------------------------------------------
+# Pattern: op node + left LSB + right LSB + left parent + right parent
+# No result node yet — distinguishes init from mid-reduction.
+# graph2s: create result node with correct bit tag
+# graph2o: wire op -> left_parent, op -> right_parent, op -> result
+# ---------------------------------------------------------------------------
+
+def _make_add_init_rule(
+    left_bit: int,
+    right_bit: int,
+) -> OperationDefinition:
+    result_bit = (left_bit + right_bit) % 2
+    carry_out = (left_bit + right_bit) >= 2
+    name = f'add_init_{left_bit}{right_bit}'
+
+    # --- Pattern ---
     p = PerspectiveGraph()
-    build_operator(p, '+')
-    return p
+    op_node = _add_op_node(p)
+    left_pos = _add_bit_one(p) if left_bit else _add_bit_zero(p)
+    right_pos = _add_bit_one(p) if right_bit else _add_bit_zero(p)
+    left_parent = _add_parent(p, left_pos)
+    right_parent = _add_parent(p, right_pos)
+    p.add_edge(op_node, left_pos, EdgeType.OPERATIONAL)
+    p.add_edge(op_node, right_pos, EdgeType.OPERATIONAL)
+    # No result node in pattern — op has exactly 2 operational edges here.
 
+    # --- graph2s ---
+    # Strips operational edges, outputs structural.
+    # Creates the result node with correct bit tag.
+    # result_bit=1: self-loop on result node
+    # result_bit=0: empty result node
+    g2s = PerspectiveGraph()
+    g2s_result = g2s.add_node()
+    if result_bit == 1:
+        g2s.add_edge(g2s_result, g2s_result, EdgeType.STRUCTURAL)
 
-def _bit_rule_rewrite(
-    graph: PerspectiveGraph,
-    result: MatchResult,
-    expect_left: int,
-    expect_right: int,
-    carry_in: bool,
-) -> None:
-    op_node = _find_plus_node(graph, result)
-    if op_node is None:
-        return
+    # --- graph2o ---
+    # Strips structural, outputs operational.
+    # Wires op -> left_parent, op -> right_parent, op -> result.
+    g2o = PerspectiveGraph()
+    g2o_op = g2o.add_node()
+    g2o_left_parent = g2o.add_node()
+    g2o_right_parent = g2o.add_node()
+    g2o_result = g2o.add_node()
+    g2o.add_edge(g2o_op, g2o_left_parent, EdgeType.OPERATIONAL)
+    g2o.add_edge(g2o_op, g2o_right_parent, EdgeType.OPERATIONAL)
+    g2o.add_edge(g2o_op, g2o_result, EdgeType.OPERATIONAL)
 
-    positions = _get_position_nodes(graph, op_node)
-    if positions is None:
-        return
+    if carry_out:
+        g2o_carry_a = g2o.add_node()
+        g2o_carry_b = g2o.add_node()
+        g2o.add_edge(g2o_result, g2o_carry_a, EdgeType.OPERATIONAL)
+        g2o.add_edge(g2o_carry_a, g2o_carry_b, EdgeType.STRUCTURAL)
+        g2o.add_edge(g2o_carry_b, g2o_carry_a, EdgeType.STRUCTURAL)
 
-    left_pos, right_pos = positions
-
-    if _has_carry(graph, op_node) != carry_in:
-        return
-
-    # Handle unequal operand lengths — exhausted side reads as 0
-    left_actual = 1 if _is_one_node(graph, left_pos) else 0
-    right_actual = 1 if _is_one_node(graph, right_pos) else 0
-
-    if left_actual != expect_left or right_actual != expect_right:
-        return
-
-    _bit_step(graph, op_node, left_pos, right_pos, carry_in)
+    return OperationDefinition(name=name, pattern=p, graph2s=g2s, graph2o=g2o)
 
 
 # ---------------------------------------------------------------------------
-# Unequal length handling
+# bit_add rules (8 rules — mid-reduction, result node exists)
+# ---------------------------------------------------------------------------
+# Pattern: op node + left bit + right bit + parents + result node
+# Carry present/absent encoded in result node's outgoing operational edges.
+# graph2s: retag result node for new result bit, remove carry if consumed
+# graph2o: advance position edges, rewire op -> result, add carry if produced
 # ---------------------------------------------------------------------------
 
-def _drain_remaining_rewrite(graph: PerspectiveGraph, result: MatchResult) -> None:
-    """
-    Fires when one position is exhausted (only 3 operational edges remain)
-    but the other still has a position. Drains remaining bits with implicit zero.
-    """
-    op_node = _find_plus_node(graph, result)
-    if op_node is None:
-        return
-
-    op_edges = graph.edges_from(op_node, EdgeType.OPERATIONAL)
-    # 3 edges: left root, right root, one remaining position
-    if len(op_edges) != 3:
-        return
-
-    left_root, right_root = _get_operand_roots(graph, op_node)
-    remaining_pos = next(
-        e.target for e in op_edges
-        if e.target != left_root and e.target != right_root
-    )
-
-    carry_in = _has_carry(graph, op_node)
-    pos_bit = 1 if _is_one_node(graph, remaining_pos) else 0
-    total = pos_bit + (1 if carry_in else 0)
+def _make_bit_add_rule(
+    left_bit: int,
+    right_bit: int,
+    carry_in: int,
+) -> OperationDefinition:
+    total = left_bit + right_bit + carry_in
     result_bit = total % 2
     carry_out = total >= 2
+    name = f'bit_add_{left_bit}{right_bit}_c{carry_in}'
 
-    _append_result_bit(graph, op_node, result_bit)
-    _advance_position(graph, op_node, remaining_pos)
-
-    if carry_out and not carry_in:
-        _build_carry_marker(graph, op_node)
-    elif carry_in and not carry_out:
-        _remove_carry_marker(graph, op_node)
-
-
-# ---------------------------------------------------------------------------
-# add_finalise
-# ---------------------------------------------------------------------------
-
-def _add_finalise_rewrite(graph: PerspectiveGraph, result: MatchResult) -> None:
-    op_node = _find_plus_node(graph, result)
-    if op_node is None:
-        return
-
-    op_edges = graph.edges_from(op_node, EdgeType.OPERATIONAL)
-    # Finalise when exactly 2 operational edges remain: left root, right root
-    # (both position edges exhausted, result edge present separately)
-    # Actually: 3 edges — left root, right root, result root
-    if len(op_edges) != 3:
-        return
-
-    result_root = _get_result_root(graph, op_node)
-    if result_root is None:
-        return
-
-    # Append final carry bit if carry still active
-    if _has_carry(graph, op_node):
-        _append_result_bit(graph, op_node, 1)
-        _remove_carry_marker(graph, op_node)
-        result_root = _get_result_root(graph, op_node)
-
-    # Rewire parent to result root
-    for e in list(graph.edges_to(op_node)):
-        graph.add_edge(e.source, result_root, e.edge_type)
-        graph.remove_edge(e)
-
-    # Tombstone operand roots
-    left_root, right_root = _get_operand_roots(graph, op_node)
-    _build_tombstone(graph, left_root)
-    _build_tombstone(graph, right_root)
-
-    graph.remove_node(op_node)
-
-
-# ---------------------------------------------------------------------------
-# Tombstone GC rule
-# ---------------------------------------------------------------------------
-
-def _make_tombstone_pattern() -> PerspectiveGraph:
-    """Pattern: node -> a -> b (3-node chain, no cycles)."""
+    # --- Pattern ---
     p = PerspectiveGraph()
-    node = p.add_node()
-    a = p.add_node()
-    b = p.add_node()
-    p.add_edge(node, a, EdgeType.STRUCTURAL)
-    p.add_edge(a, b, EdgeType.STRUCTURAL)
-    return p
+    op_node = _add_op_node(p)
+    left_pos = _add_bit_one(p) if left_bit else _add_bit_zero(p)
+    right_pos = _add_bit_one(p) if right_bit else _add_bit_zero(p)
+    left_parent = _add_parent(p, left_pos)
+    right_parent = _add_parent(p, right_pos)
+    p.add_edge(op_node, left_pos, EdgeType.OPERATIONAL)
+    p.add_edge(op_node, right_pos, EdgeType.OPERATIONAL)
+
+    # Result node — connected to op via operational edge
+    result_node = _add_result_node(p, op_node)
+
+    # Carry — attached to result node if carry_in
+    if carry_in:
+        _add_carry(p, result_node)
+
+    # --- graph2s ---
+    # New result node with correct bit tag.
+    # carry_in node pair is absent from transition — removed by step 4b.
+    g2s = PerspectiveGraph()
+    g2s_result = g2s.add_node()
+    if result_bit == 1:
+        g2s.add_edge(g2s_result, g2s_result, EdgeType.STRUCTURAL)
+
+    # --- graph2o ---
+    # Advance position edges to parents, rewire result, add carry if needed.
+    g2o = PerspectiveGraph()
+    g2o_op = g2o.add_node()
+    g2o_left_parent = g2o.add_node()
+    g2o_right_parent = g2o.add_node()
+    g2o_result = g2o.add_node()
+    g2o.add_edge(g2o_op, g2o_left_parent, EdgeType.OPERATIONAL)
+    g2o.add_edge(g2o_op, g2o_right_parent, EdgeType.OPERATIONAL)
+    g2o.add_edge(g2o_op, g2o_result, EdgeType.OPERATIONAL)
+
+    if carry_out:
+        g2o_carry_a = g2o.add_node()
+        g2o_carry_b = g2o.add_node()
+        g2o.add_edge(g2o_result, g2o_carry_a, EdgeType.OPERATIONAL)
+        g2o.add_edge(g2o_carry_a, g2o_carry_b, EdgeType.STRUCTURAL)
+        g2o.add_edge(g2o_carry_b, g2o_carry_a, EdgeType.STRUCTURAL)
+
+    return OperationDefinition(name=name, pattern=p, graph2s=g2s, graph2o=g2o)
 
 
-def _tombstone_gc_rewrite(graph: PerspectiveGraph, result: MatchResult) -> None:
-    """
-    Find tombstoned node. Remove tombstone, attach tombstones to its
-    structural children, then remove the node. Fires until subtree consumed.
-    """
-    tombstoned_node = None
-    for mapped in result.node_map.values():
-        chain = _find_tombstone_chain(graph, mapped)
-        if chain is not None:
-            tombstoned_node = mapped
-            break
+# ---------------------------------------------------------------------------
+# drain rules (2 rules — one position exhausted, other still has bits)
+# ---------------------------------------------------------------------------
+# Fires when one operand has reached its MSB (no parent in pattern).
+# The exhausted side's bit is propagated with carry if present.
+# Position edge on exhausted side is not advanced further.
+# ---------------------------------------------------------------------------
 
-    if tombstoned_node is None:
-        return
+def _make_drain_rule(
+    active_side: str,  # 'left' or 'right' — the side still being drained
+    active_bit: int,
+    carry_in: int,
+) -> OperationDefinition:
+    total = active_bit + carry_in
+    result_bit = total % 2
+    carry_out = total >= 2
+    name = f'drain_{active_side}_{active_bit}_c{carry_in}'
 
-    # Collect structural children before removal (exclude tombstone chain nodes)
-    chain = _find_tombstone_chain(graph, tombstoned_node)
-    chain_nodes = set(chain) if chain else set()
-    children = [
-        e.target for e in graph.edges_from(tombstoned_node, EdgeType.STRUCTURAL)
-        if e.target != tombstoned_node and e.target not in chain_nodes
-    ]
+    # --- Pattern ---
+    p = PerspectiveGraph()
+    op_node = _add_op_node(p)
 
-    _remove_tombstone(graph, tombstoned_node)
+    # Active side has a parent — position still advancing
+    active_pos = _add_bit_one(p) if active_bit else _add_bit_zero(p)
+    active_parent = _add_parent(p, active_pos)
 
-    for child in children:
-        _build_tombstone(graph, child)
+    # Exhausted side has no parent — bare bit node at MSB
+    # We use 0 for exhausted side (MSB of shorter number is 0 padding)
+    exhausted_pos = _add_bit_zero(p)
 
-    graph.remove_node(tombstoned_node)
+    if active_side == 'left':
+        p.add_edge(op_node, active_pos, EdgeType.OPERATIONAL)
+        p.add_edge(op_node, exhausted_pos, EdgeType.OPERATIONAL)
+    else:
+        p.add_edge(op_node, exhausted_pos, EdgeType.OPERATIONAL)
+        p.add_edge(op_node, active_pos, EdgeType.OPERATIONAL)
+
+    result_node = _add_result_node(p, op_node)
+
+    if carry_in:
+        _add_carry(p, result_node)
+
+    # --- graph2s ---
+    g2s = PerspectiveGraph()
+    g2s_result = g2s.add_node()
+    if result_bit == 1:
+        g2s.add_edge(g2s_result, g2s_result, EdgeType.STRUCTURAL)
+
+    # --- graph2o ---
+    # Active side advances to parent.
+    # Exhausted side stays at same node (no parent to advance to).
+    g2o = PerspectiveGraph()
+    g2o_op = g2o.add_node()
+    g2o_active_parent = g2o.add_node()
+    g2o_exhausted = g2o.add_node()
+    g2o_result = g2o.add_node()
+
+    if active_side == 'left':
+        g2o.add_edge(g2o_op, g2o_active_parent, EdgeType.OPERATIONAL)
+        g2o.add_edge(g2o_op, g2o_exhausted, EdgeType.OPERATIONAL)
+    else:
+        g2o.add_edge(g2o_op, g2o_exhausted, EdgeType.OPERATIONAL)
+        g2o.add_edge(g2o_op, g2o_active_parent, EdgeType.OPERATIONAL)
+
+    g2o.add_edge(g2o_op, g2o_result, EdgeType.OPERATIONAL)
+
+    if carry_out:
+        g2o_carry_a = g2o.add_node()
+        g2o_carry_b = g2o.add_node()
+        g2o.add_edge(g2o_result, g2o_carry_a, EdgeType.OPERATIONAL)
+        g2o.add_edge(g2o_carry_a, g2o_carry_b, EdgeType.STRUCTURAL)
+        g2o.add_edge(g2o_carry_b, g2o_carry_a, EdgeType.STRUCTURAL)
+
+    return OperationDefinition(name=name, pattern=p, graph2s=g2s, graph2o=g2o)
+
+
+# ---------------------------------------------------------------------------
+# add_finalise rule
+# ---------------------------------------------------------------------------
+# Fires when both positions are at MSB (no parents in pattern).
+# Rewires the parent of the op node to the result root.
+# Op node and its tag are removed. Operand trees are tombstoned.
+# ---------------------------------------------------------------------------
+
+def _make_add_finalise_rule(carry_in: int) -> OperationDefinition:
+    name = f'add_finalise_c{carry_in}'
+
+    # --- Pattern ---
+    p = PerspectiveGraph()
+    op_node = _add_op_node(p)
+
+    # Both positions at MSB — bare bit nodes, no parents
+    left_msb = _add_bit_zero(p)   # MSB of left operand (exhausted)
+    right_msb = _add_bit_zero(p)  # MSB of right operand (exhausted)
+    p.add_edge(op_node, left_msb, EdgeType.OPERATIONAL)
+    p.add_edge(op_node, right_msb, EdgeType.OPERATIONAL)
+
+    result_node = _add_result_node(p, op_node)
+
+    if carry_in:
+        _add_carry(p, result_node)
+
+    # --- graph2s ---
+    # If carry_in: create a new result node above current result (carry bit = 1)
+    # No carry_in: result node is already the final MSB
+    g2s = PerspectiveGraph()
+    if carry_in:
+        # New MSB node with value 1, structurally connected to old result
+        g2s_new_msb = g2s.add_node()
+        g2s_old_result = g2s.add_node()
+        g2s.add_edge(g2s_new_msb, g2s_new_msb, EdgeType.STRUCTURAL)  # tag as 1
+        g2s.add_edge(g2s_new_msb, g2s_old_result, EdgeType.STRUCTURAL)
+
+    # --- graph2o ---
+    # Op node is removed. External operational edge from parent of op
+    # is reattached to result root by step 6.
+    # No new operational edges needed — result root is already wired externally.
+    g2o = PerspectiveGraph()
+
+    return OperationDefinition(name=name, pattern=p, graph2s=g2s, graph2o=g2o)
+
+
+# ---------------------------------------------------------------------------
+# tombstone_gc rule
+# ---------------------------------------------------------------------------
+# Propagates tombstone marker down detached subtrees for garbage collection.
+# A tombstoned node passes its tombstone to its structural children.
+# Tombstone marker: a self-loop operational edge on the node.
+# ---------------------------------------------------------------------------
+
+def _make_tombstone_gc_rule() -> OperationDefinition:
+    # --- Pattern ---
+    p = PerspectiveGraph()
+    tombstoned = p.add_node()
+    p.add_edge(tombstoned, tombstoned, EdgeType.OPERATIONAL)  # tombstone marker
+    child = p.add_node()
+    p.add_edge(tombstoned, child, EdgeType.STRUCTURAL)
+
+    # --- graph2s ---
+    # Child gets tombstone marker. Parent is removed.
+    g2s = PerspectiveGraph()
+    g2s_child = g2s.add_node()
+    g2s.add_edge(g2s_child, g2s_child, EdgeType.OPERATIONAL)
+
+    # --- graph2o ---
+    g2o = PerspectiveGraph()
+
+    return OperationDefinition(
+        name='tombstone_gc',
+        pattern=p,
+        graph2s=g2s,
+        graph2o=g2o,
+    )
 
 
 # ---------------------------------------------------------------------------
 # Register all rules
 # ---------------------------------------------------------------------------
 
-_p_plus = _make_plus_pattern()
+# add_init — 4 rules
+for _l in range(2):
+    for _r in range(2):
+        register(_make_add_init_rule(_l, _r))
 
-register(OperationDefinition(
-    name='add_init',
-    pattern=_p_plus,
-    rewrite=_add_init_rewrite,
-))
+# bit_add — 8 rules
+for _l in range(2):
+    for _r in range(2):
+        for _c in range(2):
+            register(_make_bit_add_rule(_l, _r, _c))
 
-for _left, _right, _carry in [
-    (0, 0, False),
-    (0, 1, False),
-    (1, 0, False),
-    (1, 1, False),
-    (0, 0, True),
-    (0, 1, True),
-    (1, 0, True),
-    (1, 1, True),
-]:
-    _name = f"bit_add_{_left}{_right}_{'c1' if _carry else 'c0'}"
-    register(OperationDefinition(
-        name=_name,
-        pattern=_p_plus,
-        rewrite=lambda g, r, l=_left, ri=_right, c=_carry: (
-            _bit_rule_rewrite(g, r, l, ri, c)
-        ),
-    ))
+# drain — left active, right exhausted: 4 rules (bit × carry)
+for _b in range(2):
+    for _c in range(2):
+        register(_make_drain_rule('left', _b, _c))
 
-register(OperationDefinition(
-    name='drain_remaining',
-    pattern=_p_plus,
-    rewrite=_drain_remaining_rewrite,
-))
+# drain — right active, left exhausted: 4 rules
+for _b in range(2):
+    for _c in range(2):
+        register(_make_drain_rule('right', _b, _c))
 
-register(OperationDefinition(
-    name='add_finalise',
-    pattern=_p_plus,
-    rewrite=_add_finalise_rewrite,
-))
+# add_finalise — 2 rules (carry in or not)
+for _c in range(2):
+    register(_make_add_finalise_rule(_c))
 
-register(OperationDefinition(
-    name='tombstone_gc',
-    pattern=_make_tombstone_pattern(),
-    rewrite=_tombstone_gc_rewrite,
-))
+# tombstone_gc
+register(_make_tombstone_gc_rule())
