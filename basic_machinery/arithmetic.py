@@ -315,25 +315,34 @@ def _make_drain_rule(
 
 
 # ---------------------------------------------------------------------------
-# add_finalise rule
+# add_finalise rules (8 rules — both MSBs exhausted, carry in or not)
 # ---------------------------------------------------------------------------
 # Fires when both positions are at MSB (no parents in pattern).
-# Rewires the parent of the op node to the result root.
-# Op node and its tag are removed. Operand trees are tombstoned.
+# Op node is recycled as the new result root — its tag structure is stripped
+# by step 4b (cycle nodes + anchor absent from transition), leaving a bare
+# node that inherits the parent's existing operational edge.
+# Result tree is structurally connected to the recycled op node.
+# MSB values can be 0 or 1 — 4 combinations × 2 carry states = 8 rules.
 # ---------------------------------------------------------------------------
 
-def _make_add_finalise_rule(carry_in: int) -> OperationDefinition:
-    name = f'add_finalise_c{carry_in}'
+def _make_add_finalise_rule(
+    left_msb: int,
+    right_msb: int,
+    carry_in: int,
+) -> OperationDefinition:
+    total = left_msb + right_msb + carry_in
+    result_bit = total % 2
+    carry_out = total >= 2  # carry out beyond MSB — needs extra result node above
+    name = f'add_finalise_{left_msb}{right_msb}_c{carry_in}'
 
     # --- Pattern ---
     p = PerspectiveGraph()
     op_node = _add_op_node(p)
 
-    # Both positions at MSB — bare bit nodes, no parents
-    left_msb = _add_bit_zero(p)   # MSB of left operand (exhausted)
-    right_msb = _add_bit_zero(p)  # MSB of right operand (exhausted)
-    p.add_edge(op_node, left_msb, EdgeType.OPERATIONAL)
-    p.add_edge(op_node, right_msb, EdgeType.OPERATIONAL)
+    left_pos = _add_bit_one(p) if left_msb else _add_bit_zero(p)
+    right_pos = _add_bit_one(p) if right_msb else _add_bit_zero(p)
+    p.add_edge(op_node, left_pos, EdgeType.OPERATIONAL)
+    p.add_edge(op_node, right_pos, EdgeType.OPERATIONAL)
 
     result_node = _add_result_node(p, op_node)
 
@@ -341,20 +350,30 @@ def _make_add_finalise_rule(carry_in: int) -> OperationDefinition:
         _add_carry(p, result_node)
 
     # --- graph2s ---
-    # If carry_in: create a new result node above current result (carry bit = 1)
-    # No carry_in: result node is already the final MSB
+    # Op node survives — recycled as result root.
+    # Its cycle tag nodes are absent from transition, removed by step 4b.
+    # Result node survives with correct bit tag.
+    # If carry_out: a new MSB node (value=1) is created above result node,
+    # structurally connected. Op node becomes root of this new structure.
     g2s = PerspectiveGraph()
-    if carry_in:
-        # New MSB node with value 1, structurally connected to old result
-        g2s_new_msb = g2s.add_node()
-        g2s_old_result = g2s.add_node()
-        g2s.add_edge(g2s_new_msb, g2s_new_msb, EdgeType.STRUCTURAL)  # tag as 1
-        g2s.add_edge(g2s_new_msb, g2s_old_result, EdgeType.STRUCTURAL)
+    g2s_op = g2s.add_node()       # recycled op node — bare, no tag
+    g2s_result = g2s.add_node()
+    if result_bit == 1:
+        g2s.add_edge(g2s_result, g2s_result, EdgeType.STRUCTURAL)
+
+    if carry_out:
+        # Extra MSB node above result
+        g2s_msb = g2s.add_node()
+        g2s.add_edge(g2s_msb, g2s_msb, EdgeType.STRUCTURAL)  # value=1
+        g2s.add_edge(g2s_op, g2s_msb, EdgeType.STRUCTURAL)
+        g2s.add_edge(g2s_msb, g2s_result, EdgeType.STRUCTURAL)
+    else:
+        g2s.add_edge(g2s_op, g2s_result, EdgeType.STRUCTURAL)
 
     # --- graph2o ---
-    # Op node is removed. External operational edge from parent of op
-    # is reattached to result root by step 6.
-    # No new operational edges needed — result root is already wired externally.
+    # No new operational edges needed.
+    # Parent's operational edge to op node is preserved via step 6
+    # since op node survives as g2s_op.
     g2o = PerspectiveGraph()
 
     return OperationDefinition(name=name, pattern=p, graph2s=g2s, graph2o=g2o)
@@ -418,9 +437,11 @@ for _b in range(2):
     for _c in range(2):
         register(_make_drain_rule('right', _b, _c))
 
-# add_finalise — 2 rules (carry in or not)
-for _c in range(2):
-    register(_make_add_finalise_rule(_c))
+# add_finalise — 8 rules (left_msb × right_msb × carry_in)
+for _l in range(2):
+    for _r in range(2):
+        for _c in range(2):
+            register(_make_add_finalise_rule(_l, _r, _c))
 
 # tombstone_gc
 register(_make_tombstone_gc_rule())
