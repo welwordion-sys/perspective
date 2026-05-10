@@ -112,49 +112,49 @@ def build_equality(graph: PerspectiveGraph, finished: bool = False) -> Node:
 # Number encoding
 # ---------------------------------------------------------------------------
 
-def build_number(graph: PerspectiveGraph, value: int) -> Node:
+def build_number(graph: PerspectiveGraph, value: int) -> tuple[Node, Node]:
     """
     Encode a non-negative integer as an open-length binary tree.
     Bit order: MSB at root, LSB at deepest right leaf.
     Leaf nodes: empty node = 0, self-loop node = 1.
     Internal nodes: two structural children (left = higher bits, right = current bit).
-    Returns the root node.
+    Returns (root, lsb) — both known at construction time, no traversal needed.
     """
     if value < 0:
         raise ValueError("build_number does not handle negative integers.")
-    bits = bin(value)[2:]  # e.g. 6 -> '110'
+    bits = bin(value)[2:]
     return _build_bit_tree(graph, bits)
 
 
-def _build_bit_tree(graph: PerspectiveGraph, bits: str) -> Node:
+def _build_bit_tree(graph: PerspectiveGraph, bits: str) -> tuple[Node, Node]:
     node = graph.add_node()
     if len(bits) == 1:
         if bits == '1':
             _tag_one(graph, node)
-        # bits == '0': empty node, _tag_zero is a no-op
+        return node, node  # root and lsb are the same for a single bit
     else:
-        left = _build_bit_tree(graph, bits[:-1])  # higher bits
-        right = _build_bit_tree(graph, bits[-1])   # current LSB
-        graph.add_edge(node, left, EdgeType.STRUCTURAL)
-        graph.add_edge(node, right, EdgeType.STRUCTURAL)
-    return node
+        left_root, _ = _build_bit_tree(graph, bits[:-1])
+        right_root, lsb = _build_bit_tree(graph, bits[-1])  # lsb bubbles up from right
+        graph.add_edge(node, left_root, EdgeType.STRUCTURAL)
+        graph.add_edge(node, right_root, EdgeType.STRUCTURAL)
+        return node, lsb
 
 
 # ---------------------------------------------------------------------------
 # Parameter encoding
 # ---------------------------------------------------------------------------
 
-def build_parameter(graph: PerspectiveGraph) -> Node:
+def build_parameter(graph: PerspectiveGraph) -> tuple[Node, Node]:
     """
     Encode a symbolic parameter (x, y, ...).
     Shape: bidirectional edge to a dedicated companion node.
     All parameters are structurally identical — identity from position
     in the expression tree, not from the node itself.
-    Returns the parameter node.
+    Returns (root, lsb) — same node for both since parameters have no bit tree.
     """
     node = graph.add_node()
     _tag_parameter(graph, node)
-    return node
+    return node, node
 
 
 # ---------------------------------------------------------------------------
@@ -165,14 +165,17 @@ def connect_operands(
     graph: PerspectiveGraph,
     op_node: Node,
     left_root: Node,
-    right_root: Node
+    left_lsb: Node,
+    right_root: Node,
+    right_lsb: Node,
 ) -> None:
     """
-    Connect an operator node to its two operand subtree roots
-    via operational edges. Left operand first, right operand second.
+    Connect an operator node to the LSBs of its two operand subtrees
+    via operational edges. Position edges start at LSB and walk toward MSB
+    during reduction. Left operand first, right operand second.
     """
-    graph.add_edge(op_node, left_root, EdgeType.OPERATIONAL)
-    graph.add_edge(op_node, right_root, EdgeType.OPERATIONAL)
+    graph.add_edge(op_node, left_lsb, EdgeType.OPERATIONAL)
+    graph.add_edge(op_node, right_lsb, EdgeType.OPERATIONAL)
 
 
 def connect_equality(
@@ -228,10 +231,10 @@ def encode(graph: PerspectiveGraph, expression: str) -> Node:
       encode(g, "2 * x + 4 = 10")
     """
     tokens = _tokenize(expression)
-    node, pos = _parse_equality(graph, tokens, 0)
+    (root, _), pos = _parse_equality(graph, tokens, 0)
     if pos != len(tokens):
         raise ValueError(f"Unexpected token at position {pos}: '{tokens[pos]}'")
-    return node
+    return root
 
 
 def _tokenize(expression: str) -> list[str]:
@@ -255,14 +258,14 @@ def _tokenize(expression: str) -> list[str]:
 
 def _parse_equality(
     graph: PerspectiveGraph, tokens: list[str], pos: int
-) -> tuple[Node, int]:
+) -> tuple[tuple[Node, Node], int]:
     left, pos = _parse_additive(graph, tokens, pos)
     if pos < len(tokens) and tokens[pos] == '=':
         pos += 1
         right, pos = _parse_additive(graph, tokens, pos)
         eq_node = build_equality(graph, finished=False)
-        connect_equality(graph, eq_node, left, right)
-        return eq_node, pos
+        connect_equality(graph, eq_node, left[0], right[0])
+        return (eq_node, eq_node), pos
     return left, pos
 
 
@@ -275,8 +278,9 @@ def _parse_additive(
         pos += 1
         right, pos = _parse_multiplicative(graph, tokens, pos)
         op_node = build_operator(graph, op)
-        connect_operands(graph, op_node, left, right)
-        left = op_node
+        # left and right are (root, lsb) tuples from _parse_primary
+        connect_operands(graph, op_node, left[0], left[1], right[0], right[1])
+        left = op_node, op_node  # operator node is its own root and lsb placeholder
     return left, pos
 
 
@@ -289,14 +293,14 @@ def _parse_multiplicative(
         pos += 1
         right, pos = _parse_primary(graph, tokens, pos)
         op_node = build_operator(graph, op)
-        connect_operands(graph, op_node, left, right)
-        left = op_node
+        connect_operands(graph, op_node, left[0], left[1], right[0], right[1])
+        left = op_node, op_node
     return left, pos
 
 
 def _parse_primary(
     graph: PerspectiveGraph, tokens: list[str], pos: int
-) -> tuple[Node, int]:
+) -> tuple[tuple[Node, Node], int]:
     if pos >= len(tokens):
         raise ValueError("Unexpected end of expression.")
     token = tokens[pos]
@@ -306,9 +310,11 @@ def _parse_primary(
             raise ValueError("Expected closing parenthesis.")
         return node, pos + 1
     if token == 'x':
-        return build_parameter(graph), pos + 1
+        root, lsb = build_parameter(graph)
+        return (root, lsb), pos + 1
     if token.isdigit() or (len(token) > 1 and token.isdigit()):
-        return build_number(graph, int(token)), pos + 1
+        root, lsb = build_number(graph, int(token))
+        return (root, lsb), pos + 1
     raise ValueError(f"Unexpected token '{token}' at position {pos}.")
 
 
@@ -341,9 +347,9 @@ def _make_neutral_collapse_rule(
     # --- Pattern ---
     p = PerspectiveGraph()
     op_node = build_operator(p, op, finished=False)
-    neutral_node = build_number(p, neutral_value)
-    survivor_node = p.add_node()  # unconstrained — matches any operand root
-    p.add_edge(op_node, neutral_node, EdgeType.OPERATIONAL)
+    _, neutral_lsb = build_number(p, neutral_value)
+    survivor_node = p.add_node()
+    p.add_edge(op_node, neutral_lsb, EdgeType.OPERATIONAL)
     p.add_edge(op_node, survivor_node, EdgeType.OPERATIONAL)
 
     # --- graph2s ---
@@ -380,9 +386,9 @@ def _make_zero_product_rule() -> OperationDefinition:
     # --- Pattern ---
     p = PerspectiveGraph()
     op_node = build_operator(p, '*', finished=False)
-    zero_node = build_number(p, 0)
+    _, zero_lsb = build_number(p, 0)
     other_node = p.add_node()
-    p.add_edge(op_node, zero_node, EdgeType.OPERATIONAL)
+    p.add_edge(op_node, zero_lsb, EdgeType.OPERATIONAL)
     p.add_edge(op_node, other_node, EdgeType.OPERATIONAL)
 
     # --- graph2s ---
