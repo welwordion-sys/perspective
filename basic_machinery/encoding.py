@@ -1,10 +1,10 @@
 from __future__ import annotations
 from basic_machinery.graph import PerspectiveGraph, Node, EdgeType
-from basic_machinery.operations import OperationDefinition, register, MatchResult
+from basic_machinery.operations import OperationDefinition, register
 
 
 # ---------------------------------------------------------------------------
-# Tag builders — one per structural family
+# Tag builders
 # ---------------------------------------------------------------------------
 
 def _tag_zero(graph: PerspectiveGraph, node: Node) -> None:
@@ -18,7 +18,7 @@ def _tag_one(graph: PerspectiveGraph, node: Node) -> None:
 
 
 def _tag_parameter(graph: PerspectiveGraph, node: Node) -> None:
-    """Parameter (x, y): bidirectional edge to a dedicated companion node."""
+    """Parameter: bidirectional edge to a dedicated companion node."""
     companion = graph.add_node()
     graph.add_edge(node, companion, EdgeType.STRUCTURAL)
     graph.add_edge(companion, node, EdgeType.STRUCTURAL)
@@ -26,20 +26,31 @@ def _tag_parameter(graph: PerspectiveGraph, node: Node) -> None:
 
 def _tag_cycle(graph: PerspectiveGraph, node: Node, size: int) -> None:
     """
-    Attach a directed cycle of `size` nodes to `node`.
+    Unfinished operator/equality tag.
+    Directed cycle of `size` nodes attached to node.
+    cycle[0] gets a left anchor node — dead-end structural edge that
+    marks operand asymmetry and provides a consistent GA grammar entry point.
+
     node -> cycle[0] -> cycle[1] -> ... -> cycle[size-1] -> cycle[0]
+    cycle[0] -> anchor
     """
     cycle_nodes = [graph.add_node() for _ in range(size)]
     for i in range(size):
         graph.add_edge(cycle_nodes[i], cycle_nodes[(i + 1) % size], EdgeType.STRUCTURAL)
     graph.add_edge(node, cycle_nodes[0], EdgeType.STRUCTURAL)
+    anchor = graph.add_node()
+    graph.add_edge(cycle_nodes[0], anchor, EdgeType.STRUCTURAL)
 
 
 def _tag_cycle_plus(graph: PerspectiveGraph, node: Node, size: int) -> None:
     """
-    Attach a directed cycle of `size` nodes plus one tail node.
+    Finished operator/equality tag.
+    Same as _tag_cycle but cycle[size-1] also has a tail node.
+    Tail presence = finished state. Anchor off cycle[0] = left marker.
+
     node -> cycle[0] -> ... -> cycle[size-1] -> cycle[0]
                                cycle[size-1] -> tail
+    cycle[0] -> anchor
     """
     cycle_nodes = [graph.add_node() for _ in range(size)]
     tail = graph.add_node()
@@ -48,31 +59,39 @@ def _tag_cycle_plus(graph: PerspectiveGraph, node: Node, size: int) -> None:
     graph.add_edge(cycle_nodes[-1], cycle_nodes[0], EdgeType.STRUCTURAL)
     graph.add_edge(cycle_nodes[-1], tail, EdgeType.STRUCTURAL)
     graph.add_edge(node, cycle_nodes[0], EdgeType.STRUCTURAL)
+    anchor = graph.add_node()
+    graph.add_edge(cycle_nodes[0], anchor, EdgeType.STRUCTURAL)
 
 
 # ---------------------------------------------------------------------------
 # Operator and equality node builders
 # ---------------------------------------------------------------------------
 
+# Unique cycle size per operator — no overloading, no ambiguity.
+# Tail presence (via _tag_cycle_plus) encodes finished state uniformly.
+# Sizes 1 and 2 are reserved: 1-cycle = bit value 1, 2-cycle = carry marker.
 _OPERATOR_TAGS = {
-    '+': (_tag_cycle,      3),  # triangle
-    '-': (_tag_cycle_plus, 3),  # triangle + tail
-    '*': (_tag_cycle,      4),  # square
-    '/': (_tag_cycle_plus, 4),  # square + tail
+    '+': 3,
+    '-': 4,
+    '*': 5,
+    '/': 6,
 }
 
-_EQUALITY_TAGS = {
-    'unfinished': (_tag_cycle,      5),
-    'finished':   (_tag_cycle_plus, 5),
-}
+_EQUALITY_SIZE = 7
 
 
-def build_operator(graph: PerspectiveGraph, op: str) -> Node:
-    """Build an operator node with its identifying cycle tag. Returns the operator node."""
+def build_operator(graph: PerspectiveGraph, op: str, finished: bool = False) -> Node:
+    """
+    Build an operator node with its identifying cycle tag.
+    finished=False (default): unfinished, at least one operand contains a parameter.
+    finished=True: both operands are concrete numbers, arithmetic rules may fire.
+    Returns the operator node.
+    """
     if op not in _OPERATOR_TAGS:
         raise ValueError(f"Unknown operator '{op}'. Expected one of {list(_OPERATOR_TAGS)}")
     node = graph.add_node()
-    tag_fn, size = _OPERATOR_TAGS[op]
+    size = _OPERATOR_TAGS[op]
+    tag_fn = _tag_cycle_plus if finished else _tag_cycle
     tag_fn(graph, node, size)
     return node
 
@@ -81,11 +100,11 @@ def build_equality(graph: PerspectiveGraph, finished: bool = False) -> Node:
     """
     Build an equality node.
     Unfinished (default): open equation, at least one parameter side.
-    Finished: both sides are concrete values — terminal state, no rules fire on this.
+    Finished: both sides are concrete values — terminal state, no rules fire.
     """
     node = graph.add_node()
-    tag_fn, size = _EQUALITY_TAGS['finished' if finished else 'unfinished']
-    tag_fn(graph, node, size)
+    tag_fn = _tag_cycle_plus if finished else _tag_cycle
+    tag_fn(graph, node, _EQUALITY_SIZE)
     return node
 
 
@@ -93,49 +112,49 @@ def build_equality(graph: PerspectiveGraph, finished: bool = False) -> Node:
 # Number encoding
 # ---------------------------------------------------------------------------
 
-def build_number(graph: PerspectiveGraph, value: int) -> Node:
+def build_number(graph: PerspectiveGraph, value: int) -> tuple[Node, Node]:
     """
     Encode a non-negative integer as an open-length binary tree.
     Bit order: MSB at root, LSB at deepest right leaf.
     Leaf nodes: empty node = 0, self-loop node = 1.
     Internal nodes: two structural children (left = higher bits, right = current bit).
-    Returns the root node.
+    Returns (root, lsb) — both known at construction time, no traversal needed.
     """
     if value < 0:
         raise ValueError("build_number does not handle negative integers.")
-    bits = bin(value)[2:]  # e.g. 6 -> '110'
+    bits = bin(value)[2:]
     return _build_bit_tree(graph, bits)
 
 
-def _build_bit_tree(graph: PerspectiveGraph, bits: str) -> Node:
+def _build_bit_tree(graph: PerspectiveGraph, bits: str) -> tuple[Node, Node]:
     node = graph.add_node()
     if len(bits) == 1:
         if bits == '1':
             _tag_one(graph, node)
-        # bits == '0': empty node, _tag_zero is a no-op
+        return node, node  # root and lsb are the same for a single bit
     else:
-        left = _build_bit_tree(graph, bits[:-1])  # higher bits
-        right = _build_bit_tree(graph, bits[-1])  # current LSB
-        graph.add_edge(node, left, EdgeType.STRUCTURAL)
-        graph.add_edge(node, right, EdgeType.STRUCTURAL)
-    return node
+        left_root, _ = _build_bit_tree(graph, bits[:-1])
+        right_root, lsb = _build_bit_tree(graph, bits[-1])  # lsb bubbles up from right
+        graph.add_edge(node, left_root, EdgeType.STRUCTURAL)
+        graph.add_edge(node, right_root, EdgeType.STRUCTURAL)
+        return node, lsb
 
 
 # ---------------------------------------------------------------------------
 # Parameter encoding
 # ---------------------------------------------------------------------------
 
-def build_parameter(graph: PerspectiveGraph) -> Node:
+def build_parameter(graph: PerspectiveGraph) -> tuple[Node, Node]:
     """
     Encode a symbolic parameter (x, y, ...).
     Shape: bidirectional edge to a dedicated companion node.
     All parameters are structurally identical — identity from position
     in the expression tree, not from the node itself.
-    Returns the parameter node.
+    Returns (root, lsb) — same node for both since parameters have no bit tree.
     """
     node = graph.add_node()
     _tag_parameter(graph, node)
-    return node
+    return node, node
 
 
 # ---------------------------------------------------------------------------
@@ -146,14 +165,17 @@ def connect_operands(
     graph: PerspectiveGraph,
     op_node: Node,
     left_root: Node,
-    right_root: Node
+    left_lsb: Node,
+    right_root: Node,
+    right_lsb: Node,
 ) -> None:
     """
-    Connect an operator node to its two operand subtree roots
-    via operational edges. Left operand first, right operand second.
+    Connect an operator node to the LSBs of its two operand subtrees
+    via operational edges. Position edges start at LSB and walk toward MSB
+    during reduction. Left operand first, right operand second.
     """
-    graph.add_edge(op_node, left_root, EdgeType.OPERATIONAL)
-    graph.add_edge(op_node, right_root, EdgeType.OPERATIONAL)
+    graph.add_edge(op_node, left_lsb, EdgeType.OPERATIONAL)
+    graph.add_edge(op_node, right_lsb, EdgeType.OPERATIONAL)
 
 
 def connect_equality(
@@ -175,6 +197,9 @@ def get_operands(graph: PerspectiveGraph, op_node: Node) -> tuple[Node, Node]:
     Return the (left, right) operand roots of an operator or equality node.
     Order matches the order operational edges were added.
     Raises if the node does not have exactly two operational edges.
+
+    NOTE: order-dependent on insertion order from a set — fragile under
+    concurrent rule application. Revisit if multiple rules fire simultaneously.
     """
     edges = graph.edges_from(op_node, EdgeType.OPERATIONAL)
     if len(edges) != 2:
@@ -206,10 +231,10 @@ def encode(graph: PerspectiveGraph, expression: str) -> Node:
       encode(g, "2 * x + 4 = 10")
     """
     tokens = _tokenize(expression)
-    node, pos = _parse_equality(graph, tokens, 0)
+    (root, _), pos = _parse_equality(graph, tokens, 0)
     if pos != len(tokens):
         raise ValueError(f"Unexpected token at position {pos}: '{tokens[pos]}'")
-    return node
+    return root
 
 
 def _tokenize(expression: str) -> list[str]:
@@ -233,14 +258,14 @@ def _tokenize(expression: str) -> list[str]:
 
 def _parse_equality(
     graph: PerspectiveGraph, tokens: list[str], pos: int
-) -> tuple[Node, int]:
+) -> tuple[tuple[Node, Node], int]:
     left, pos = _parse_additive(graph, tokens, pos)
     if pos < len(tokens) and tokens[pos] == '=':
         pos += 1
         right, pos = _parse_additive(graph, tokens, pos)
         eq_node = build_equality(graph, finished=False)
-        connect_equality(graph, eq_node, left, right)
-        return eq_node, pos
+        connect_equality(graph, eq_node, left[0], right[0])
+        return (eq_node, eq_node), pos
     return left, pos
 
 
@@ -253,8 +278,9 @@ def _parse_additive(
         pos += 1
         right, pos = _parse_multiplicative(graph, tokens, pos)
         op_node = build_operator(graph, op)
-        connect_operands(graph, op_node, left, right)
-        left = op_node
+        # left and right are (root, lsb) tuples from _parse_primary
+        connect_operands(graph, op_node, left[0], left[1], right[0], right[1])
+        left = op_node, op_node  # operator node is its own root and lsb placeholder
     return left, pos
 
 
@@ -267,14 +293,14 @@ def _parse_multiplicative(
         pos += 1
         right, pos = _parse_primary(graph, tokens, pos)
         op_node = build_operator(graph, op)
-        connect_operands(graph, op_node, left, right)
-        left = op_node
+        connect_operands(graph, op_node, left[0], left[1], right[0], right[1])
+        left = op_node, op_node
     return left, pos
 
 
 def _parse_primary(
     graph: PerspectiveGraph, tokens: list[str], pos: int
-) -> tuple[Node, int]:
+) -> tuple[tuple[Node, Node], int]:
     if pos >= len(tokens):
         raise ValueError("Unexpected end of expression.")
     token = tokens[pos]
@@ -284,160 +310,112 @@ def _parse_primary(
             raise ValueError("Expected closing parenthesis.")
         return node, pos + 1
     if token == 'x':
-        return build_parameter(graph), pos + 1
+        root, lsb = build_parameter(graph)
+        return (root, lsb), pos + 1
     if token.isdigit() or (len(token) > 1 and token.isdigit()):
-        return build_number(graph, int(token)), pos + 1
+        root, lsb = build_number(graph, int(token))
+        return (root, lsb), pos + 1
     raise ValueError(f"Unexpected token '{token}' at position {pos}.")
 
 
 # ---------------------------------------------------------------------------
-# Seed rules
+# Seed rule helpers — pattern and transition graph builders
 # ---------------------------------------------------------------------------
 
-def _make_add_zero_pattern() -> tuple[PerspectiveGraph, Node, Node]:
+def _make_neutral_collapse_rule(
+    op: str,
+    neutral_value: int,
+    name: str,
+) -> OperationDefinition:
     """
-    Pattern: an addition node with a zero node as one operand.
-    Returns (pattern_graph, add_node, zero_node).
-    The second operand is not in the pattern — recovered dynamically in rewrite.
+    Build a neutral element collapse rule for the given operator and neutral value.
+
+    Pattern:
+      op_node -OPER-> neutral_node   (neutral operand)
+      op_node -OPER-> survivor_node  (surviving operand — unconstrained)
+
+    graph2s (strip OPERATIONAL, output STRUCTURAL):
+      Input nodes: op_node, neutral_node, survivor_node
+      No structural edges added.
+      op_node and neutral_node have no outgoing strip-type edges in the
+      transition — they are removed in step 4b.
+      survivor_node survives. External OPERATIONAL edge from parent to
+      op_node is reattached to survivor_node by step 6.
+
+    graph2o: empty — no new operational edges needed.
     """
+    # --- Pattern ---
     p = PerspectiveGraph()
-    add_node = build_operator(p, '+')
-    zero_node = build_number(p, 0)
-    p.add_edge(add_node, zero_node, EdgeType.OPERATIONAL)
-    return p, add_node, zero_node
+    op_node = build_operator(p, op, finished=False)
+    _, neutral_lsb = build_number(p, neutral_value)
+    survivor_node = p.add_node()
+    p.add_edge(op_node, neutral_lsb, EdgeType.OPERATIONAL)
+    p.add_edge(op_node, survivor_node, EdgeType.OPERATIONAL)
+
+    # --- graph2s ---
+    # survivor_node is the only node that survives into the output.
+    # It has no outgoing OPERATIONAL edges in the transition, so it is
+    # treated as an input node by _apply_pass and mapped to its graph counterpart.
+    # op_node and neutral_node are absent from the transition — removed in step 4b.
+    g2s = PerspectiveGraph()
+    g2s.add_node()  # survivor — no edges, signals preservation
+
+    # --- graph2o ---
+    g2o = PerspectiveGraph()
+
+    return OperationDefinition(
+        name=name,
+        pattern=p,
+        graph2s=g2s,
+        graph2o=g2o,
+    )
 
 
-def _make_mul_one_pattern() -> tuple[PerspectiveGraph, Node, Node]:
-    """Pattern: a multiplication node with a one node as one operand."""
-    p = PerspectiveGraph()
-    mul_node = build_operator(p, '*')
-    one_node = build_number(p, 1)
-    p.add_edge(mul_node, one_node, EdgeType.OPERATIONAL)
-    return p, mul_node, one_node
-
-
-def _make_sub_zero_pattern() -> tuple[PerspectiveGraph, Node, Node]:
-    """Pattern: a subtraction node with a zero node as right operand."""
-    p = PerspectiveGraph()
-    sub_node = build_operator(p, '-')
-    zero_node = build_number(p, 0)
-    p.add_edge(sub_node, zero_node, EdgeType.OPERATIONAL)
-    return p, sub_node, zero_node
-
-
-def _make_div_one_pattern() -> tuple[PerspectiveGraph, Node, Node]:
-    """Pattern: a division node with a one node as right operand."""
-    p = PerspectiveGraph()
-    div_node = build_operator(p, '/')
-    one_node = build_number(p, 1)
-    p.add_edge(div_node, one_node, EdgeType.OPERATIONAL)
-    return p, div_node, one_node
-
-
-def _make_mul_zero_pattern() -> tuple[PerspectiveGraph, Node, Node]:
-    """Pattern: a multiplication node with a zero node as one operand."""
-    p = PerspectiveGraph()
-    mul_node = build_operator(p, '*')
-    zero_node = build_number(p, 0)
-    p.add_edge(mul_node, zero_node, EdgeType.OPERATIONAL)
-    return p, mul_node, zero_node
-
-
-def _neutral_element_rewrite(
-    graph: PerspectiveGraph,
-    result: MatchResult,
-    pattern_op: Node,
-    pattern_neutral: Node
-) -> None:
+def _make_zero_product_rule() -> OperationDefinition:
     """
-    Generic rewrite for neutral element collapse.
-    Finds the surviving operand (the one that is NOT the neutral element),
-    rewires any edges pointing to the operator node to point to the survivor,
-    then removes the operator node and neutral subtree.
+    Build the x * 0 -> 0 collapse rule.
+
+    Pattern:
+      op_node -OPER-> zero_node
+      op_node -OPER-> other_node  (the non-zero operand, unconstrained)
+
+    Both operands and the op node are removed. A fresh zero node replaces
+    the entire expression. graph2s produces the new zero node's structural
+    identity (empty — no structural edges). graph2o is empty.
     """
-    graph_op = result.node_map[pattern_op]
-    graph_neutral = result.node_map[pattern_neutral]
+    # --- Pattern ---
+    p = PerspectiveGraph()
+    op_node = build_operator(p, '*', finished=False)
+    _, zero_lsb = build_number(p, 0)
+    other_node = p.add_node()
+    p.add_edge(op_node, zero_lsb, EdgeType.OPERATIONAL)
+    p.add_edge(op_node, other_node, EdgeType.OPERATIONAL)
 
-    # Find the surviving operand root
-    op_edges = graph.edges_from(graph_op, EdgeType.OPERATIONAL)
-    survivor = None
-    for e in op_edges:
-        if e.target != graph_neutral:
-            survivor = e.target
-            break
+    # --- graph2s ---
+    # New zero node: empty node, no structural edges.
+    # op_node, zero_node, other_node all absent from transition — removed.
+    # The new zero node is created fresh by _apply_pass (not in input_match).
+    # External OPERATIONAL edge reattaches to it via step 6.
+    g2s = PerspectiveGraph()
+    g2s.add_node()  # fresh zero node — empty, no edges
 
-    if survivor is None:
-        # Both operands matched neutral — expression is neutral op neutral
-        # e.g. 0 + 0: collapse to zero
-        survivor = graph_neutral
+    # --- graph2o ---
+    g2o = PerspectiveGraph()
 
-    # Rewire: any node pointing to graph_op now points to survivor
-    incoming = graph.edges_to(graph_op)
-    for e in incoming:
-        graph.add_edge(e.source, survivor, e.edge_type)
-        graph.remove_edge(e)
-
-    # Remove operator node (edges attached to it are cleaned up by remove_node)
-    graph.remove_node(graph_op)
-
-
-def _zero_product_rewrite(
-    graph: PerspectiveGraph,
-    result: MatchResult,
-    pattern_op: Node,
-    pattern_zero: Node
-) -> None:
-    """
-    Rewrite for x * 0 or 0 * x -> 0.
-    Replaces the multiplication subtree with a fresh zero node.
-    """
-    graph_op = result.node_map[pattern_op]
-
-    # Build a new zero node to replace the whole expression
-    zero = build_number(graph, 0)
-
-    # Rewire incoming edges
-    incoming = graph.edges_to(graph_op)
-    for e in incoming:
-        graph.add_edge(e.source, zero, e.edge_type)
-        graph.remove_edge(e)
-
-    graph.remove_node(graph_op)
+    return OperationDefinition(
+        name='mul_zero_collapse',
+        pattern=p,
+        graph2s=g2s,
+        graph2o=g2o,
+    )
 
 
-# --- Register seed rules ---
+# ---------------------------------------------------------------------------
+# Register seed rules
+# ---------------------------------------------------------------------------
 
-_p, _op, _neutral = _make_add_zero_pattern()
-register(OperationDefinition(
-    name='add_zero_collapse',
-    pattern=_p,
-    rewrite=lambda g, r: _neutral_element_rewrite(g, r, _op, _neutral)
-))
-
-_p, _op, _neutral = _make_mul_one_pattern()
-register(OperationDefinition(
-    name='mul_one_collapse',
-    pattern=_p,
-    rewrite=lambda g, r: _neutral_element_rewrite(g, r, _op, _neutral)
-))
-
-_p, _op, _neutral = _make_sub_zero_pattern()
-register(OperationDefinition(
-    name='sub_zero_collapse',
-    pattern=_p,
-    rewrite=lambda g, r: _neutral_element_rewrite(g, r, _op, _neutral)
-))
-
-_p, _op, _neutral = _make_div_one_pattern()
-register(OperationDefinition(
-    name='div_one_collapse',
-    pattern=_p,
-    rewrite=lambda g, r: _neutral_element_rewrite(g, r, _op, _neutral)
-))
-
-_p, _op, _zero = _make_mul_zero_pattern()
-register(OperationDefinition(
-    name='mul_zero_collapse',
-    pattern=_p,
-    rewrite=lambda g, r: _zero_product_rewrite(g, r, _op, _zero)
-))
+register(_make_neutral_collapse_rule('+', 0, 'add_zero_collapse'))
+register(_make_neutral_collapse_rule('*', 1, 'mul_one_collapse'))
+register(_make_neutral_collapse_rule('-', 0, 'sub_zero_collapse'))
+register(_make_neutral_collapse_rule('/', 1, 'div_one_collapse'))
+register(_make_zero_product_rule())
