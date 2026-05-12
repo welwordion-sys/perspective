@@ -61,59 +61,6 @@ def _add_result_node(p: PerspectiveGraph, op_node: Node) -> Node:
 
 
 # ---------------------------------------------------------------------------
-# Transition graph helpers
-# ---------------------------------------------------------------------------
-
-def _make_advance_graph2o(
-    left_parent: Node,
-    right_parent: Node,
-    result_node: Node,
-    op_node: Node,
-    add_carry: bool,
-) -> PerspectiveGraph:
-    """
-    Build graph2o for a bit rule.
-    Strips structural edges, outputs operational edges:
-    - op_node -> left_parent  (position advances to parent)
-    - op_node -> right_parent
-    - op_node -> result_node  (result edge preserved)
-    - result_node -> carry_a  (only if add_carry=True)
-
-    All nodes referenced here must already exist in the pattern graph
-    so the node_map can resolve them.
-    """
-    g = PerspectiveGraph()
-    # Nodes in graph2o must mirror the pattern nodes that survive.
-    # We build a minimal graph referencing only the nodes we need.
-    # _apply_pass matches input nodes (those with outgoing strip-type edges
-    # in the transition) against the post-strip subgraph, then follows
-    # strip-type (structural) edges to build the output node map.
-    # Since we want to output operational edges, graph2o's strip_type=STRUCTURAL.
-    # Input nodes in graph2o = nodes with outgoing STRUCTURAL edges in graph2o.
-    # We add no structural edges here — all nodes are isolated input nodes,
-    # each mapping to their counterpart in the node_map from graph2s.
-    # Operational edges between them are then written into the target graph.
-
-    g_op = g.add_node()       # maps to op_node
-    g_left = g.add_node()     # maps to left_parent
-    g_right = g.add_node()    # maps to right_parent
-    g_result = g.add_node()   # maps to result_node
-
-    g.add_edge(g_op, g_left, EdgeType.OPERATIONAL)
-    g.add_edge(g_op, g_right, EdgeType.OPERATIONAL)
-    g.add_edge(g_op, g_result, EdgeType.OPERATIONAL)
-
-    if add_carry:
-        g_carry_a = g.add_node()
-        g_carry_b = g.add_node()
-        g.add_edge(g_result, g_carry_a, EdgeType.OPERATIONAL)
-        g.add_edge(g_carry_a, g_carry_b, EdgeType.STRUCTURAL)
-        g.add_edge(g_carry_b, g_carry_a, EdgeType.STRUCTURAL)
-
-    return g
-
-
-# ---------------------------------------------------------------------------
 # add_init rules (4 rules — first bit step, no result node yet)
 # ---------------------------------------------------------------------------
 # Pattern: op node + left LSB + right LSB + left parent + right parent
@@ -239,7 +186,7 @@ def _make_bit_add_rule(
 
 
 # ---------------------------------------------------------------------------
-# drain rules (2 rules — one position exhausted, other still has bits)
+# drain rules (8 rules — one position exhausted, other still has bits)
 # ---------------------------------------------------------------------------
 # Fires when one operand has reached its MSB (no parent in pattern).
 # The exhausted side's bit is propagated with carry if present.
@@ -322,7 +269,7 @@ def _make_drain_rule(
 # by step 4b (cycle nodes + anchor absent from transition), leaving a bare
 # node that inherits the parent's existing operational edge.
 # Result tree is structurally connected to the recycled op node.
-# MSB values can be 0 or 1 — 4 combinations × 2 carry states = 8 rules.
+# MSB values can be 0 or 1 — 4 combinations x 2 carry states = 8 rules.
 # ---------------------------------------------------------------------------
 
 def _make_add_finalise_rule(
@@ -427,7 +374,7 @@ for _l in range(2):
         for _c in range(2):
             register(_make_bit_add_rule(_l, _r, _c))
 
-# drain — left active, right exhausted: 4 rules (bit × carry)
+# drain — left active, right exhausted: 4 rules (bit x carry)
 for _b in range(2):
     for _c in range(2):
         register(_make_drain_rule('left', _b, _c))
@@ -437,7 +384,7 @@ for _b in range(2):
     for _c in range(2):
         register(_make_drain_rule('right', _b, _c))
 
-# add_finalise — 8 rules (left_msb × right_msb × carry_in)
+# add_finalise — 8 rules (left_msb x right_msb x carry_in)
 for _l in range(2):
     for _r in range(2):
         for _c in range(2):
