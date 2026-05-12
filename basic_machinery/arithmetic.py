@@ -63,16 +63,30 @@ def _add_result_node(p: PerspectiveGraph, op_node: Node) -> Node:
 # ---------------------------------------------------------------------------
 # add_init rules (4 rules — first bit step, no result node yet)
 # ---------------------------------------------------------------------------
-# Pattern: op node + left LSB + right LSB + left parent + right parent
-# No result node yet — distinguishes init from mid-reduction.
+# Pattern: op node + left LSB + right LSB. No parents, no result node.
+# add_init only initialises the result accumulator.
+# Position advance is handled by bit_add/drain rules which carry parent context.
 # graph2s: create result node with correct bit tag
-# graph2o: wire op -> left_parent, op -> right_parent, op -> result
+# graph2o: wire op -> left_lsb, op -> right_lsb, op -> result
 # ---------------------------------------------------------------------------
 
 def _make_add_init_rule(
     left_bit: int,
     right_bit: int,
 ) -> OperationDefinition:
+    """
+    First bit step. Creates result node and wires three operational edges.
+    No parents in pattern — add_init only initialises the result accumulator.
+    Position advance is handled by bit_add/drain rules which carry parent context.
+
+    Pattern: op node with exactly two operational edges (left LSB, right LSB).
+    No result node yet — this is the distinguishing condition from bit_add rules.
+
+    graph2s: create result node tagged with first result bit.
+    graph2o: wire op -> left_lsb, op -> right_lsb, op -> result.
+             Position edges point back to the same LSB nodes already there.
+             Carry wired to result node if first bit sum >= 2.
+    """
     result_bit = (left_bit + right_bit) % 2
     carry_out = (left_bit + right_bit) >= 2
     name = f'add_init_{left_bit}{right_bit}'
@@ -82,32 +96,30 @@ def _make_add_init_rule(
     op_node = _add_op_node(p)
     left_pos = _add_bit_one(p) if left_bit else _add_bit_zero(p)
     right_pos = _add_bit_one(p) if right_bit else _add_bit_zero(p)
-    left_parent = _add_parent(p, left_pos)
-    right_parent = _add_parent(p, right_pos)
     p.add_edge(op_node, left_pos, EdgeType.OPERATIONAL)
     p.add_edge(op_node, right_pos, EdgeType.OPERATIONAL)
-    # No result node in pattern — op has exactly 2 operational edges here.
 
     # --- graph2s ---
-    # Strips operational edges, outputs structural.
-    # Creates the result node with correct bit tag.
-    # result_bit=1: self-loop on result node
-    # result_bit=0: empty result node
+    # Purely generative — creates result node with correct bit tag.
+    # No OPERATIONAL edges in transition — no existing nodes consumed.
+    # NOTE: _apply_pass step 2 with empty input_nodes produces empty output_node_map.
+    # Step 4b will remove all matched nodes. This is a known engine limitation —
+    # op node survival must be verified in tests and _apply_pass may need patching.
     g2s = PerspectiveGraph()
     g2s_result = g2s.add_node()
     if result_bit == 1:
         g2s.add_edge(g2s_result, g2s_result, EdgeType.STRUCTURAL)
 
     # --- graph2o ---
-    # Strips structural, outputs operational.
-    # Wires op -> left_parent, op -> right_parent, op -> result.
+    # Wire op -> left_pos, op -> right_pos (re-establish position edges),
+    # op -> result (new result edge).
     g2o = PerspectiveGraph()
     g2o_op = g2o.add_node()
-    g2o_left_parent = g2o.add_node()
-    g2o_right_parent = g2o.add_node()
+    g2o_left = g2o.add_node()
+    g2o_right = g2o.add_node()
     g2o_result = g2o.add_node()
-    g2o.add_edge(g2o_op, g2o_left_parent, EdgeType.OPERATIONAL)
-    g2o.add_edge(g2o_op, g2o_right_parent, EdgeType.OPERATIONAL)
+    g2o.add_edge(g2o_op, g2o_left, EdgeType.OPERATIONAL)
+    g2o.add_edge(g2o_op, g2o_right, EdgeType.OPERATIONAL)
     g2o.add_edge(g2o_op, g2o_result, EdgeType.OPERATIONAL)
 
     if carry_out:
@@ -158,7 +170,7 @@ def _make_bit_add_rule(
 
     # --- graph2s ---
     # New result node with correct bit tag.
-    # carry_in node pair is absent from transition — removed by step 4b.
+    # carry_in node pair absent from transition — removed by step 4b.
     g2s = PerspectiveGraph()
     g2s_result = g2s.add_node()
     if result_bit == 1:
@@ -309,7 +321,6 @@ def _make_add_finalise_rule(
         g2s.add_edge(g2s_result, g2s_result, EdgeType.STRUCTURAL)
 
     if carry_out:
-        # Extra MSB node above result
         g2s_msb = g2s.add_node()
         g2s.add_edge(g2s_msb, g2s_msb, EdgeType.STRUCTURAL)  # value=1
         g2s.add_edge(g2s_op, g2s_msb, EdgeType.STRUCTURAL)
@@ -331,7 +342,7 @@ def _make_add_finalise_rule(
 # ---------------------------------------------------------------------------
 # Propagates tombstone marker down detached subtrees for garbage collection.
 # A tombstoned node passes its tombstone to its structural children.
-# Tombstone marker: a self-loop operational edge on the node.
+# Tombstone marker: operational self-loop on the node.
 # ---------------------------------------------------------------------------
 
 def _make_tombstone_gc_rule() -> OperationDefinition:
