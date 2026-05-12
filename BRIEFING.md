@@ -1,5 +1,5 @@
 # Perspective — Mobile Session Briefing
-**Updated:** 2026-05-03 | **Next task:** P2 — Input Layer and Encoding (implementation)
+**Updated:** 2026-05-10 | **Next task:** P2 — Write tests, validate apply() end-to-end
 
 ---
 
@@ -19,120 +19,176 @@ Representation Space Traversal AI — a system that solves problems by traversin
 
 ## What exists
 **P1 — Complete (2026-05-01)**
-- `basic_machinery/graph.py` — PerspectiveGraph, directed graph with binary edge typing (structural / operational), node/edge management, copy, restore
-- `basic_machinery/operations.py` — Graph Operation Interface: match, apply, revert, complexity, lookup, register
-- 9 passing tests
+- `basic_machinery/graph.py` — PerspectiveGraph, directed graph with binary edge typing, node/edge management, copy, restore, subgraph(). Unchanged.
+- `basic_machinery/operations.py` — Triple graph schema (pattern, graph2s, graph2o). Committed 2026-05-06.
+- 9 tests — ALL BROKEN by operations.py redesign, need rewriting.
+
+**P2 — In progress**
+- `basic_machinery/encoding.py` — REWRITTEN this session (2026-05-10). See encoding decisions below.
+- `basic_machinery/arithmetic.py` — REWRITTEN this session (2026-05-10). 23 rules, all triple schema. See rule set below.
+- Tests: not yet written.
 
 ---
 
-## Current phase: P2 — Input Layer and Encoding
+## operations.py schema (complete, committed 2026-05-06)
 
-**Goal:** Encode arithmetic expressions and linear equations as directed graphs.
+**Triple schema:** (pattern, graph2s, graph2o)
+- `pattern` — mixed edge types, used for matching
+- `graph2s` — strip OPERATIONAL, output STRUCTURAL. Pass 1.
+- `graph2o` — strip STRUCTURAL, output OPERATIONAL. Pass 2.
 
-**Encoding decisions (design complete, implementation pending):**
+**Firing sequence:**
+1. match(pattern, graph) → node_map
+2. Pass 1: strip operational → match graph2s input → follow mapping → write structural output → reattach operational via step 6
+3. Pass 2: strip structural (updated_map from Pass 1) → match graph2o input → follow mapping → write operational output → reattach structural via step 6
 
-**Numbers:**
-- Minimal binary trees, open-length — depth determined by the number, no fixed bitwidth, no padding
-- Each number has exactly one structural representation
-- Internal edges are structural
+**Key behaviours:**
+- Nodes absent from transition output are removed (step 4b)
+- New nodes in transition not matched from input are instantiated fresh
+- Step 6 reattaches stripped edges to surviving mapped nodes — enables external edge rewiring without including parent in pattern
+- restore() is a standalone function: snapshot → apply → revert on failure
 
-**Operators (`+`, `-`, `*`, `/`):**
-- Internal nodes with distinct arbitrary structural shapes — no node typing
-- Connect to operand subtree roots via operational edges
-- Four initial operators; new operators added as needed with new distinct shapes
+---
 
-**Equality (`=`):**
-- Root node of equation expression tree
-- Distinct structural shape from arithmetic operators
+## Encoding decisions (complete, encoding.py rewritten 2026-05-10)
 
-**Variable `x`:**
-- Anonymous structural node, distinct shape
-- Belongs to parameter structural family (separate from operand family)
-- No special rule treatment — arithmetic rules simply don't match it
+**Tag design:**
+- `_tag_cycle(node, size)` — unfinished operator/equality. Directed cycle of `size` nodes. cycle[0] gets a left anchor (dead-end structural node) for operand asymmetry and GA grammar consistency.
+- `_tag_cycle_plus(node, size)` — finished operator/equality. Same as _tag_cycle but cycle[-1] also has a tail node. Tail = finished state.
+- Both functions include the anchor — uniform grammar for GA mutation.
 
-**Expression tree structure:**
-- Operators as internal nodes, numbers/variables as leaves
-- Tree topology encodes evaluation order — deeper nodes resolve first
-- No explicit bracket nodes needed
+**Operator cycle sizes (unique per operator, no overloading):**
+- `+`: 3-cycle
+- `-`: 4-cycle
+- `*`: 5-cycle
+- `/`: 6-cycle
+- `=`: 7-cycle
+- Sizes 1 (bit value 1) and 2 (carry marker) reserved.
 
-**Carry propagation:**
-- Operational edge from operator to current bit position acts as cursor
-- Rule detaches and reattaches edge to next bit node — no extra marker node
+**Finished/unfinished semantics:**
+- Unfinished = operator can still be reduced (both operands are concrete numbers). Arithmetic rules fire on unfinished operators.
+- Finished = terminal, no rules fire. Happens when at least one operand contains a parameter.
+- build_operator(graph, op, finished=False) — default unfinished.
 
-**Label format:**
-- Pure arithmetic (e.g. `3 + 4`): label is terminal value node — `7`. No wrapper.
-- Equations (e.g. `2x + 4 = 10`): label is solved form graph — `x = 3`. Irreducible — `x = 3` does NOT collapse to `3`.
-- Collapse rule: `x = x → x`, `3 = 3 → 3`, but `x = 3` stays as-is.
+**Numbers:** Open-length binary tree. MSB at root, LSB at deepest right leaf. Empty node = 0, self-loop = 1. build_number returns (root, lsb) tuple — lsb known at construction, no traversal needed.
 
-**Complexity ladder (train in this order):**
-1. Pure arithmetic — `3 + 4`, label: `7`
-2. One-step solving — `x + 4 = 7`, label: `x = 3`
-3. Two-step solving — `2x + 4 = 10`, label: `x = 3`
-4. Variable on both sides — `2x + 4 = 3x - 1`, label: `x = 5`
+**Parameters:** Bidirectional structural edge to companion node. build_parameter returns (root, lsb) tuple where both are the same node.
 
-**Seed rules:**
-- Bootstrap scaffold — present at GA generation zero, fully mutable
-- Handle large base graph size before library accumulates
-- Displacement by library-informed rules is the success signal
-- If seed rules dominate after N generations, library accumulation is broken
+**connect_operands:** Now takes (op_node, left_root, left_lsb, right_root, right_lsb). Position edges attached to LSBs at encode time. Applies to all operators — bit traversal is universal.
 
-**Open design question for implementation start:**
-- Concrete structural shapes for operator nodes, parameter nodes, and carry marker
+**Negative numbers:** Represented as `0 - n` subtree.
 
-**Exit condition:** Expressions reliably converted to base graphs. Sample manually inspected and encoding confirmed sane.
+**Carry marker:** 2-cycle. One node attached to result node via operational edge. Asymmetry from directionality of that operational edge — no extra structure needed.
+
+**Position pointer:** Two operational edges from operator node to current bit position (LSB initially). Advance = position edge moves to parent. Parent included in pattern for match — node switching handles the rest.
+
+**Tombstone marker:** Operational self-loop on node. Propagated to structural children by tombstone_gc rule.
+
+**Seed rules (in encoding.py, triple schema):**
+- add_zero_collapse: x + 0 -> x
+- sub_zero_collapse: x - 0 -> x
+- mul_one_collapse: x * 1 -> x
+- div_one_collapse: x / 1 -> x
+- mul_zero_collapse: x * 0 -> 0
+
+---
+
+## Arithmetic rule set (arithmetic.py, 23 rules, triple schema)
+
+**add_init (4 rules):** add_init_00, add_init_01, add_init_10, add_init_11
+- Pattern: op node + left LSB + right LSB + left parent + right parent. No result node.
+- graph2s: create result node with correct bit tag.
+- graph2o: wire op → left_parent, op → right_parent, op → result. Add carry if needed.
+
+**bit_add (8 rules):** bit_add_XY_cZ for X,Y in {0,1}, Z in {0,1}
+- Pattern: op node + left bit + parent + right bit + parent + result node. Carry encoded as 2-cycle on result node.
+- graph2s: retag result node for new bit value. Carry 2-cycle absent from transition = removed.
+- graph2o: advance position edges to parents. Rewire op → result. Add carry if produced.
+
+**drain (8 rules):** drain_left/right_B_cC for B in {0,1}, C in {0,1}
+- Fires when one side exhausted (no parent in pattern). Active side advances, exhausted side stays.
+- 4 rules per side (bit × carry).
+
+**add_finalise (8 rules):** add_finalise_LR_cC for L,R,C in {0,1}
+- Fires when both positions at MSB (no parents). Op node recycled as result root — tag structure removed by step 4b, bare op node inherits parent's operational edge.
+- graph2s: connect recycled op node to result tree. If carry_out: create extra MSB node (value=1) above result.
+- graph2o: empty.
+
+**tombstone_gc (1 rule):**
+- Pattern: tombstoned node (operational self-loop) + structural child.
+- graph2s: child gets tombstone. Parent removed.
+
+---
+
+## Design decisions made this session
+
+1. Operator identity by unique cycle size — no overloading, no tail for identity.
+2. Tail = finished state uniformly across all operators and equality.
+3. Anchor off cycle[0] on all tags — operand asymmetry + GA grammar consistency.
+4. build_number returns (root, lsb) — lsb known at construction.
+5. connect_operands attaches to LSBs — universal, applies to all operators.
+6. Carry marker on result node, not op node — op node pattern stays uniform across bit rules.
+7. Tombstone = operational self-loop (not 3-node chain as in old design).
+8. Op node recycled as result root in add_finalise — no rewiring problem.
+9. Drain rules handle exhausted side by pattern absence of parent — no explicit exhaustion marker.
+10. Layer transitions (not hypergraphs) will solve wildcard problem at higher abstraction level — not a P2 concern.
+
+---
+
+## Next session task
+
+**Write tests.** This will immediately surface whether _apply_pass handles node mapping correctly for the new transition graphs. Start with:
+1. add_init_00 end-to-end — simplest rule, validates the full apply() pipeline
+2. bit_add_01_c0 — validates position advance and result tagging
+3. add_finalise_00_c0 — validates op node recycling
+4. One seed rule — validates survivor node reattachment via step 6
+
+All 9 old tests are broken — rewrite against new schema after the above validate.
+
+---
+
+## Open questions
+- Verify operand left/right order survives match() permutation — critical before subtraction rules
+- Wildcard matching deferred to layer transition design
+- Hyperedges deferred to P6
+- match() is O(n!) — acceptable for prototype, flagged for P6 profiling
 
 ---
 
 ## Architecture essentials
 
 **Two systems:**
-- Data Transformation System — traverses representation space using reversible graph rules. Owns the library.
-- Logic Rewriting System — improves the rules using a GA. Fitness signal: label-conditioned reproducibility (minimize variance in subgraph output per label across expressions).
+- Data Transformation System — traverses representation space using reversible graph rules.
+- Logic Rewriting System — improves rules using GA. Fitness: label-conditioned reproducibility.
 
-**Library:** Entries are byproducts of GA convergence — subgraphs that consistently appear under converged rules for a given label earn entry. Not frequency, not MDL.
+**Substrate:** Directed graphs, binary edge types (structural / operational). No node attributes, no weights.
 
-**Reversibility:** Every rule firing is reversible. Rule path is the inverse map. The pair (result graph + rule path) is the full reversible state.
-
-**Substrate:** Directed graphs, binary edge types only (structural / operational). No node attributes, no weights, no hyperedges in base prototype.
-
-**Graph rewrite rule representation:**
-- Two-graph schema: Graph 1 (mixed edge types, for matching) + Graph 2 (single edge type, for transition)
-- Rule firing: (1) match Graph 1, (2) strip one edge type, (3) apply Graph 2, (4) reattach stripped edges via node mapping
-- Operational edges serve as node pointers in rules; when input is operational, structural edges take the pointer role (role swap at interpreter level)
-- GA operates on each graph independently — no pairing complexity
+**Upgrade paths:** Hypergraphs, weighted graphs — named but deferred.
 
 **Layer types:**
-- Within-layer transformation: switches representation without changing abstraction level (e.g. `3+4 → 7`)
-- Layer transition: changes abstraction level — collapses local detail into higher-level structure
+- Within-layer: same abstraction level (e.g. `3+4 → 7`)
+- Layer transition: changes abstraction level
 
-**P6 gate (future):** Binary decision — directed graph sufficient (pass) or hyperedges needed (fail). Fail is additive — directed graph is hypergraph at k=2, everything recycles.
-
----
-
-## Open critical questions
-- q_07: Are hyperedges required? (answered at P6)
-- q_03: Invariant retention mechanism — how does system decide what to keep without explicit confirmation?
+**Test sequence (planned):** Arithmetic equation solving → Symbol finding in pictures → further tests → meta-level scope increase.
 
 ---
 
-## Communication rules (applies to this session)
+## Communication rules
 - No softening — name errors directly
 - Default: user is competent
 - No praise unless genuinely non-obvious
 - Useful over agreeable
-- Flag tentative positions explicitly before stating them as conclusions
-- This is bidirectional — Claude flags user reasoning gaps too
+- Flag tentative positions before stating as conclusions
 
 ---
 
 ## Mobile workflow
-- No KB writes on mobile — note decisions as a list, push from PC
+- No KB writes on mobile — note decisions, push from PC
 - No code implementation on mobile — describe intent, implement on PC
-- Architecture and design discussion: fine on mobile
-- End of session: list any decisions made for PC push
+- End of session: list decisions for PC push
 
 ---
 
 ## Next session start prompt
 Paste this file and add:
-> "No GitHub access. Mobile session. Current task: P2 implementation. [your question or task]"
+> "No GitHub access. Mobile session. [your question or task]"
