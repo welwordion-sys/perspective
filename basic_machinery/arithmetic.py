@@ -70,49 +70,44 @@ def _add_result_node(p: PerspectiveGraph, op_node: Node) -> Node:
 # graph2o: wire op -> left_lsb, op -> right_lsb, op -> result
 # ---------------------------------------------------------------------------
 
-def _make_add_init_rule(
-    left_bit: int,
-    right_bit: int,
-) -> OperationDefinition:
-    """
-    First bit step. Creates result node and wires three operational edges.
-    No parents in pattern — add_init only initialises the result accumulator.
-    Position advance is handled by bit_add/drain rules which carry parent context.
-
-    Pattern: op node with exactly two operational edges (left LSB, right LSB).
-    No result node yet — this is the distinguishing condition from bit_add rules.
-
-    graph2s: create result node tagged with first result bit.
-    graph2o: wire op -> left_lsb, op -> right_lsb, op -> result.
-             Position edges point back to the same LSB nodes already there.
-             Carry wired to result node if first bit sum >= 2.
-    """
+def _make_add_init_rule(left_bit: int, right_bit: int) -> OperationDefinition:
     result_bit = (left_bit + right_bit) % 2
     carry_out = (left_bit + right_bit) >= 2
     name = f'add_init_{left_bit}{right_bit}'
 
     # --- Pattern ---
+    # Unfinished op node (has tail), two LSB bit nodes, no result node yet.
     p = PerspectiveGraph()
-    op_node = _add_op_node(p)
+    op_node = _add_op_node(p)  # builds unfinished = cycle + anchor + tail
     left_pos = _add_bit_one(p) if left_bit else _add_bit_zero(p)
     right_pos = _add_bit_one(p) if right_bit else _add_bit_zero(p)
     p.add_edge(op_node, left_pos, EdgeType.OPERATIONAL)
     p.add_edge(op_node, right_pos, EdgeType.OPERATIONAL)
 
     # --- graph2s ---
-    # Purely generative — creates result node with correct bit tag.
-    # No OPERATIONAL edges in transition — no existing nodes consumed.
-    # NOTE: _apply_pass step 2 with empty input_nodes produces empty output_node_map.
-    # Step 4b will remove all matched nodes. This is a known engine limitation —
-    # op node survival must be verified in tests and _apply_pass may need patching.
+    # Transition shows op_node as finished (cycle + anchor, no tail).
+    # Tail is absent from transition — removed by step 4b.
+    # Result node created fresh, attached structurally to op_node.
+    # Op_node survives because 3-cycle gives it outgoing structural edges.
+    # Bit nodes absent from transition — removed by step 4b.
     g2s = PerspectiveGraph()
+    from basic_machinery.encoding import build_operator as _build_op
+    g2s_op = _build_op(g2s, '+', finished=True)   # cycle + anchor, no tail
     g2s_result = g2s.add_node()
     if result_bit == 1:
         g2s.add_edge(g2s_result, g2s_result, EdgeType.STRUCTURAL)
+    g2s.add_edge(g2s_op, g2s_result, EdgeType.STRUCTURAL)
+
+    if carry_out:
+        g2s_carry_a = g2s.add_node()
+        g2s_carry_b = g2s.add_node()
+        g2s.add_edge(g2s_result, g2s_carry_a, EdgeType.STRUCTURAL)
+        g2s.add_edge(g2s_carry_a, g2s_carry_b, EdgeType.STRUCTURAL)
+        g2s.add_edge(g2s_carry_b, g2s_carry_a, EdgeType.STRUCTURAL)
 
     # --- graph2o ---
-    # Wire op -> left_pos, op -> right_pos (re-establish position edges),
-    # op -> result (new result edge).
+    # Wire op -> left_lsb, op -> right_lsb, op -> result.
+    # Carry wired to result if carry_out.
     g2o = PerspectiveGraph()
     g2o_op = g2o.add_node()
     g2o_left = g2o.add_node()

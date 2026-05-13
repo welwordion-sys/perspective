@@ -81,29 +81,18 @@ _EQUALITY_SIZE = 7
 
 
 def build_operator(graph: PerspectiveGraph, op: str, finished: bool = False) -> Node:
-    """
-    Build an operator node with its identifying cycle tag.
-    finished=False (default): unfinished, at least one operand contains a parameter.
-    finished=True: both operands are concrete numbers, arithmetic rules may fire.
-    Returns the operator node.
-    """
     if op not in _OPERATOR_TAGS:
         raise ValueError(f"Unknown operator '{op}'. Expected one of {list(_OPERATOR_TAGS)}")
     node = graph.add_node()
     size = _OPERATOR_TAGS[op]
-    tag_fn = _tag_cycle_plus if finished else _tag_cycle
+    tag_fn = _tag_cycle if finished else _tag_cycle_plus  # swapped
     tag_fn(graph, node, size)
     return node
 
 
 def build_equality(graph: PerspectiveGraph, finished: bool = False) -> Node:
-    """
-    Build an equality node.
-    Unfinished (default): open equation, at least one parameter side.
-    Finished: both sides are concrete values — terminal state, no rules fire.
-    """
     node = graph.add_node()
-    tag_fn = _tag_cycle_plus if finished else _tag_cycle
+    tag_fn = _tag_cycle if finished else _tag_cycle_plus  # swapped
     tag_fn(graph, node, _EQUALITY_SIZE)
     return node
 
