@@ -20,7 +20,7 @@ Coverage priority:
 from __future__ import annotations
 import pytest
 from basic_machinery.graph import PerspectiveGraph, Node, EdgeType
-from basic_machinery.encoding import encode, build_number, build_operator, connect_operands
+from basic_machinery.encoding import build_number, build_operator, connect_operands
 from basic_machinery.operations import apply, lookup, match
 import basic_machinery.arithmetic  # noqa: F401 — side effect: registers all rules
 
@@ -66,56 +66,20 @@ def has_carry(g: PerspectiveGraph, result_node: Node) -> bool:
                     return True
     return False
 
-def find_op_node(g: PerspectiveGraph) -> Node:
-    """Find the + operator node — the one with a 3-cycle reachable from it."""
-    for node in g.nodes:
-        edges = struct_edges(g, node)
-        if len(edges) == 1:
-            nxt = edges[0].target
-            if nxt != node:
-                # check 3-cycle: node -> nxt -> nxt2 -> node
-                nxt_edges = struct_edges(g, nxt)
-                if len(nxt_edges) == 1:
-                    nxt2 = nxt_edges[0].target
-                    nxt2_edges = struct_edges(g, nxt2)
-                    if len(nxt2_edges) == 1 and nxt2_edges[0].target == node:
-                        return node
-    raise AssertionError("No + operator node found in graph")
-
-def get_result_root(g: PerspectiveGraph, op_node: Node) -> Node | None:
+def find_result_node(g: PerspectiveGraph, op_node: Node, nodes_before: set) -> Node | None:
     """
-    Result root = operational target of op_node that is NOT in either operand tree.
-    Operand roots are op_edges[0] and op_edges[1].
+    Result node = new node (not in nodes_before) that op_node has an operational edge to.
     """
-    edges = op_edges(g, op_node)
-    if len(edges) < 3:
-        return None
-    operand_roots = {edges[0].target, edges[1].target}
-
-    def in_tree(root: Node, target: Node) -> bool:
-        visited: set[Node] = set()
-        stack = [root]
-        while stack:
-            n = stack.pop()
-            if n == target:
-                return True
-            if n in visited:
-                continue
-            visited.add(n)
-            for e in g.edges_from(n, EdgeType.STRUCTURAL):
-                stack.append(e.target)
-        return False
-
-    for e in edges[2:]:
-        if not any(in_tree(r, e.target) for r in operand_roots):
+    new_nodes = set(g.nodes) - nodes_before
+    for e in g.edges_from(op_node, EdgeType.OPERATIONAL):
+        if e.target in new_nodes:
             return e.target
     return None
 
 def read_binary_tree(g: PerspectiveGraph, root: Node) -> int:
     """
     Read a binary number from a tree rooted at root.
-    MSB at root, LSB at deepest right leaf.
-    Left child = structural child[0], right child = structural child[1] (if exists).
+    MSB at root, LSB at deepest leaf.
     """
     def collect_bits(node: Node) -> list[int]:
         bit = 1 if is_one(g, node) else 0
@@ -125,11 +89,9 @@ def read_binary_tree(g: PerspectiveGraph, root: Node) -> int:
         ]
         if not children:
             return [bit]
-        right = children[1] if len(children) >= 2 else children[0]
-        return [bit] + collect_bits(right)
+        return [bit] + collect_bits(children[0])
 
     bits = collect_bits(root)
-    # bits[0] is MSB. Convert: sum(bit * 2^(len-1-i) for i, bit in enumerate(bits))
     value = 0
     for b in bits:
         value = value * 2 + b
@@ -169,6 +131,7 @@ class TestAddInit00:
     def setup_method(self):
         self.g, self.op = build_addition_graph(0, 0)
         self.op_def = lookup('add_init_00')
+        self.nodes_before = set(self.g.nodes)
 
     def test_pattern_matches(self):
         result = match(self.op_def.pattern, self.g)
@@ -177,26 +140,25 @@ class TestAddInit00:
     def test_apply_returns_true(self):
         assert apply(self.g, self.op_def)
 
-    def test_result_node_created(self):
+    def test_result_node_created(self):    
         apply(self.g, self.op_def)
-        result = get_result_root(self.g, self.op)
-        assert result is not None, "No result node found after add_init_00"
+        result = find_result_node(self.g, self.op, self.nodes_before)
+        assert result is not None, f"No result node found. nodes={list(self.g.nodes)} edges={list(self.g.edges)}"
 
     def test_result_bit_is_zero(self):
         apply(self.g, self.op_def)
-        result = get_result_root(self.g, self.op)
+        result = find_result_node(self.g, self.op, self.nodes_before)
+        assert result is not None
         assert is_zero(self.g, result), "Result bit should be 0 for 0+0"
 
     def test_no_carry_produced(self):
         apply(self.g, self.op_def)
-        result = get_result_root(self.g, self.op)
+        result = find_result_node(self.g, self.op, self.nodes_before)
+        assert result is not None
         assert not has_carry(self.g, result), "0+0 should not produce carry"
 
     def test_position_edges_advanced(self):
         apply(self.g, self.op_def)
-        # After init on single-bit numbers (0), both positions advanced to
-        # parent — which for a single-node number means exhausted.
-        # op should have 3 operational edges: left_root, right_root, result
         edges = op_edges(self.g, self.op)
         assert len(edges) == 3, f"Expected 3 op edges after add_init_00, got {len(edges)}"
 
@@ -209,19 +171,21 @@ class TestAddInit11:
     def setup_method(self):
         self.g, self.op = build_addition_graph(1, 1)
         self.op_def = lookup('add_init_11')
+        self.nodes_before = set(self.g.nodes)
 
     def test_apply_returns_true(self):
         assert apply(self.g, self.op_def)
 
     def test_result_bit_is_zero(self):
         apply(self.g, self.op_def)
-        result = get_result_root(self.g, self.op)
+        result = find_result_node(self.g, self.op, self.nodes_before)
         assert result is not None
         assert is_zero(self.g, result), "1+1 LSB result should be 0"
 
     def test_carry_produced(self):
         apply(self.g, self.op_def)
-        result = get_result_root(self.g, self.op)
+        result = find_result_node(self.g, self.op, self.nodes_before)
+        assert result is not None
         assert has_carry(self.g, result), "1+1 should produce carry"
 
 
@@ -231,12 +195,9 @@ class TestAddInit11:
 
 class TestBitAdd01C0:
     def setup_method(self):
-        # Build 2+1 = 10+01 in binary. After add_init_10 on LSBs (0+1):
-        # result bit = 1, positions advance to next bit.
-        # We'll directly construct the mid-state.
         self.g, self.op = build_addition_graph(2, 1)
-        # Run add_init to get into mid-reduction state
         assert apply(self.g, lookup('add_init_01')), "add_init_01 should fire on 2+1"
+        self.nodes_before = set(self.g.nodes)
         self.op_def = lookup('bit_add_01_c0')
 
     def test_pattern_matches(self):
@@ -248,26 +209,26 @@ class TestBitAdd01C0:
 
     def test_result_bit_is_one(self):
         apply(self.g, self.op_def)
-        result = get_result_root(self.g, self.op)
+        result = find_result_node(self.g, self.op, self.nodes_before)
         assert result is not None
         assert is_one(self.g, result), "0+1 should give result bit 1"
 
     def test_no_carry(self):
         apply(self.g, self.op_def)
-        result = get_result_root(self.g, self.op)
+        result = find_result_node(self.g, self.op, self.nodes_before)
+        assert result is not None
         assert not has_carry(self.g, result)
 
 
 # ---------------------------------------------------------------------------
-# 4. bit_add_11_c1 — mid-step: left=1, right=1, carry in → carry out
+# 4. bit_add_11_c1 — mid-step: left=1, right=1, carry in -> carry out
 # ---------------------------------------------------------------------------
 
 class TestBitAdd11C1:
     def setup_method(self):
-        # 3+3 = 11+11. After add_init_11: result=0, carry=1, positions at MSB.
-        # Next: bit_add_11_c1 fires on MSBs.
         self.g, self.op = build_addition_graph(3, 3)
         assert apply(self.g, lookup('add_init_11'))
+        self.nodes_before = set(self.g.nodes)
         self.op_def = lookup('bit_add_11_c1')
 
     def test_pattern_matches(self):
@@ -275,15 +236,15 @@ class TestBitAdd11C1:
         assert result.success
 
     def test_result_bit_is_one(self):
-        # 1+1+1 = 3 → bit=1, carry=1
         apply(self.g, self.op_def)
-        result = get_result_root(self.g, self.op)
+        result = find_result_node(self.g, self.op, self.nodes_before)
         assert result is not None
         assert is_one(self.g, result), "1+1+1 result bit should be 1"
 
     def test_carry_out(self):
         apply(self.g, self.op_def)
-        result = get_result_root(self.g, self.op)
+        result = find_result_node(self.g, self.op, self.nodes_before)
+        assert result is not None
         assert has_carry(self.g, result), "1+1+1 should carry out"
 
 
@@ -293,11 +254,9 @@ class TestBitAdd11C1:
 
 class TestDrainLeft:
     def setup_method(self):
-        # 2+0 = 10+0. add_init fires on 0+0 (LSBs). Result=0, no carry.
-        # Right is now exhausted (single bit), left still has MSB.
-        # drain_left_1_c0 should fire (left MSB=1, no carry).
         self.g, self.op = build_addition_graph(2, 0)
         assert apply(self.g, lookup('add_init_00'))
+        self.nodes_before = set(self.g.nodes)
         self.op_def = lookup('drain_left_1_c0')
 
     def test_pattern_matches(self):
@@ -309,7 +268,7 @@ class TestDrainLeft:
 
     def test_result_bit_is_one(self):
         apply(self.g, self.op_def)
-        result = get_result_root(self.g, self.op)
+        result = find_result_node(self.g, self.op, self.nodes_before)
         assert result is not None
         assert is_one(self.g, result), "Draining 1 with no carry should give bit=1"
 
@@ -320,10 +279,9 @@ class TestDrainLeft:
 
 class TestAddFinalise00C0:
     def setup_method(self):
-        # 0+0: after add_init_00, both positions exhausted, result=0, no carry.
-        # add_finalise_00_c0 should fire.
         self.g, self.op = build_addition_graph(0, 0)
         assert apply(self.g, lookup('add_init_00'))
+        self.nodes_before = set(self.g.nodes)
         self.op_def = lookup('add_finalise_00_c0')
 
     def test_pattern_matches(self):
@@ -334,15 +292,13 @@ class TestAddFinalise00C0:
         assert apply(self.g, self.op_def)
 
     def test_op_node_removed(self):
-        node_before = self.op
         apply(self.g, self.op_def)
-        assert node_before not in self.g.nodes, "Op node should be removed after finalise"
+        assert self.op not in self.g.nodes, "Op node should be removed after finalise"
 
     def test_result_accessible(self):
-        # After finalise, op node is gone. The result tree root should be
-        # reachable from wherever op node's parent was — but for a standalone
-        # graph with no parent, we just check the result node still exists.
-        result_before = get_result_root(self.g, self.op)
+        # Find result node before finalise — it's a new node from add_init
+        init_nodes_before = set()
+        result_before = find_result_node(self.g, self.op, init_nodes_before)
         apply(self.g, self.op_def)
         assert result_before in self.g.nodes, "Result node should survive finalise"
 
@@ -353,12 +309,6 @@ class TestAddFinalise00C0:
 
 class TestAddFinaliseCarryOverflow:
     def setup_method(self):
-        # 1+1: add_init_11 → result=0, carry=1, positions exhausted.
-        # add_finalise_00_c1 fires: result bit = 0+0+1=1, carry_out=0.
-        # No extra MSB needed here. Use 3+1=100 for overflow:
-        # 3=11, 1=01. add_init_11 → result=0, carry. bit_add_10_c1 on MSBs
-        # (left=1, right=0, carry=1): total=2, bit=0, carry=1 → add_finalise_00_c1.
-        # Actually just test 1+1 directly for the carry-in finalise case.
         self.g, self.op = build_addition_graph(1, 1)
         assert apply(self.g, lookup('add_init_11'))
         self.op_def = lookup('add_finalise_00_c1')
@@ -371,12 +321,8 @@ class TestAddFinaliseCarryOverflow:
         assert apply(self.g, self.op_def)
 
     def test_extra_msb_created(self):
-        # 1+1=10: after finalise, result tree should encode 2 = binary 10.
-        # The extra MSB (carry overflow) is a new node above the result node.
-        # We don't have the op node anymore, so we look for a 2-node result tree.
         apply(self.g, self.op_def)
-        # Find a node with a structural child that has a self-loop — that's
-        # the extra MSB (1) above result (0). Result of 1+1 = 10 in binary.
+        # 1+1=10: find a node with value=1 that has a zero child
         found = False
         for node in self.g.nodes:
             children = [
@@ -401,7 +347,6 @@ class TestTombstoneGC:
         self.parent = self.g.add_node()
         self.child = self.g.add_node()
         self.g.add_edge(self.parent, self.child, EdgeType.STRUCTURAL)
-        # Apply tombstone: operational self-loop on parent
         self.g.add_edge(self.parent, self.parent, EdgeType.OPERATIONAL)
         self.op_def = lookup('tombstone_gc')
 
@@ -422,7 +367,6 @@ class TestTombstoneGC:
 
     def test_second_gc_removes_child(self):
         apply(self.g, self.op_def)
-        # child now tombstoned with no structural children → gc fires, removes child
         result = match(self.op_def.pattern, self.g)
         if result.success:
             apply(self.g, self.op_def)
@@ -447,8 +391,6 @@ class TestEndToEnd1Plus1:
     def test_result_is_2(self):
         g, op = build_addition_graph(1, 1)
         run_until_stable(g, self.ADD_RULES)
-        # Op node is gone. Find the result tree — should encode 2 = binary 10.
-        # Look for a node with a self-loop (1) with a zero child.
         found_root = None
         for node in g.nodes:
             if is_one(g, node):
@@ -473,7 +415,6 @@ class TestEndToEnd3Plus1:
     def test_result_is_4(self):
         g, op = build_addition_graph(3, 1)
         run_until_stable(g, self.ADD_RULES)
-        # 4 = binary 100 — a 1-node (MSB) with a zero child with a zero child.
         found_root = None
         for node in g.nodes:
             if is_one(g, node):

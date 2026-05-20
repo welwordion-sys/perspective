@@ -91,6 +91,28 @@ def revert(graph: PerspectiveGraph, snap: PerspectiveGraph) -> None:
     graph.restore(snap)
 
 
+def _build_retyped_subgraph(
+    source: PerspectiveGraph,
+    nodes: set[Node],
+    strip_type: EdgeType,
+) -> PerspectiveGraph:
+    """Build a subgraph of source restricted to nodes, excluding strip_type edges.
+    Used to build the input subgraph for matching — only structural context,
+    no mapping edges."""
+    g = PerspectiveGraph()
+    g._nodes = set(nodes)
+    g._next_id = source._next_id
+    for edge in source.edges:
+        if edge.source in nodes and edge.target in nodes:
+            if edge.edge_type != strip_type:
+                g._edges.add(Edge(
+                    source=edge.source,
+                    target=edge.target,
+                    edge_type=edge.edge_type,
+                ))
+    return g
+
+
 def _apply_pass(
     graph: PerspectiveGraph,
     node_map: dict[Node, Node],
@@ -104,7 +126,9 @@ def _apply_pass(
     )
     matched_target_nodes = set(node_map.values())
 
-    # Step 1: strip strip_type edges from matched subgraph
+    # Step 1: convert strip_type edges to output_type in matched subgraph.
+    # Recorded for reattachment. Converting instead of removing preserves
+    # structural context so input subgraph matching is unambiguous.
     stripped_edges = []
     for edge in list(graph.edges):
         if (
@@ -114,22 +138,33 @@ def _apply_pass(
         ):
             stripped_edges.append(edge)
             graph.remove_edge(edge)
+            graph.add_edge(edge.source, edge.target, output_type)
 
-    # Step 2: identify input nodes via single edge pass
+    # Step 2: identify output-only nodes in transition.
+    # Output-only = have incoming strip_type edges but no outgoing strip_type edges.
+    # Input subgraph = all transition nodes except output-only nodes.
     has_outgoing: set[Node] = set()
     has_incoming: set[Node] = set()
     for edge in transition.edges:
         if edge.edge_type == strip_type:
             has_outgoing.add(edge.source)
             has_incoming.add(edge.target)
-    input_nodes = has_outgoing - has_incoming
+    output_only = has_incoming - has_outgoing
+    input_nodes = set(transition.nodes) - output_only
 
-    # Step 3: match transition input subgraph against stripped matched subgraph
-    input_subgraph = transition.subgraph(input_nodes)
-    stripped_subgraph = graph.subgraph(matched_target_nodes)
-    input_match = match(input_subgraph, stripped_subgraph)
+    # Step 3: match input subgraph (strip_type retyped as output_type) against
+    # matched subgraph (which also has strip_type converted to output_type).
+    retyped_input = _build_retyped_subgraph(transition, input_nodes, strip_type)
+    matched_subgraph = graph.subgraph(matched_target_nodes)
+    input_match = match(retyped_input, matched_subgraph)
+    with open('debug_out.txt', 'a') as f:
+        f.write(f"strip={strip_type} input_nodes={len(input_nodes)} retyped_input nodes={len(list(retyped_input.nodes))} edges={len(list(retyped_input.edges))} matched_subgraph nodes={len(list(matched_subgraph.nodes))} edges={len(list(matched_subgraph.edges))} match={input_match.success} map={input_match.node_map}\n")
     if not input_match.success:
+        # Revert conversion
         for edge in stripped_edges:
+            temp = Edge(source=edge.source, target=edge.target, edge_type=output_type)
+            if temp in graph:
+                graph.remove_edge(temp)
             graph.add_edge(edge.source, edge.target, strip_type)
         return node_map
 
@@ -150,11 +185,15 @@ def _apply_pass(
                     follow_mapping(edge.target, graph.add_node())
 
     for t_input, target in input_match.node_map.items():
-        follow_mapping(t_input, target)
+        if t_input in has_outgoing:
+            follow_mapping(t_input, target)
 
     # Step 4b: remove unmapped nodes from target graph
     for target_node in matched_target_nodes:
         if target_node not in output_node_map.values():
+            for edge in list(graph.edges):
+                if edge.source == target_node or edge.target == target_node:
+                    graph.remove_edge(edge)
             graph.remove_node(target_node)
 
     # Step 5: write output_type edges from transition into target graph
@@ -164,13 +203,19 @@ def _apply_pass(
         source = output_node_map.get(edge.source)
         target = output_node_map.get(edge.target)
         if source is not None and target is not None:
-            graph.add_edge(source, target, output_type)
+            candidate = Edge(source=source, target=target, edge_type=output_type)
+            if candidate not in graph:
+                graph.add_edge(source, target, output_type)
 
-    # Step 6: reattach stripped edges — only where both endpoints are mapped
+    # Step 6: reattach as strip_type where both endpoints survived.
+    # Remove temporary output_type conversion and restore as strip_type.
     for edge in stripped_edges:
         new_source = output_node_map.get(edge.source)
         new_target = output_node_map.get(edge.target)
         if new_source is not None and new_target is not None:
+            temp = Edge(source=new_source, target=new_target, edge_type=output_type)
+            if temp in graph:
+                graph.remove_edge(temp)
             graph.add_edge(new_source, new_target, strip_type)
 
     return output_node_map
@@ -184,7 +229,7 @@ def apply(
     if not result.success:
         return False
 
-    # Pass 1: strip operational, output structural — fires graph2s
+    # Pass 1: convert operational to structural, output structural — fires graph2s
     updated_map = _apply_pass(
         graph,
         result.node_map,
@@ -192,8 +237,7 @@ def apply(
         strip_type=EdgeType.OPERATIONAL,
     )
 
-    # Pass 2: strip structural, output operational — fires graph2o
-    # deleted nodes from Pass 1 silently ignored
+    # Pass 2: convert structural to operational, output operational — fires graph2o
     _apply_pass(
         graph,
         updated_map,
@@ -208,10 +252,6 @@ def restore(
     graph: PerspectiveGraph,
     operation: OperationDefinition,
 ) -> bool:
-    """
-    Attempt to apply operation. Revert to pre-application state on failure.
-    Returns True if operation was applied, False if reverted.
-    """
     snap = snapshot(graph)
     success = apply(graph, operation)
     if not success:
