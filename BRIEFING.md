@@ -193,7 +193,8 @@ All 9 old tests are broken — rewrite against new schema after the above valida
 Paste this file and add:
 > "No GitHub access. Mobile session. [your question or task]"
 >
-> Session 2026-05-20 summary — add to P2 status:
+>
+Session 2026-05-20 summary — add to P2 status:
 Engine (operations.py) significantly reworked:
 
 Step 1 now converts strip_type edges to output_type (not removes) to preserve structural context for matching
