@@ -192,3 +192,27 @@ All 9 old tests are broken — rewrite against new schema after the above valida
 ## Next session start prompt
 Paste this file and add:
 > "No GitHub access. Mobile session. [your question or task]"
+>
+>
+Session 2026-05-20 summary — add to P2 status:
+Engine (operations.py) significantly reworked:
+
+Step 1 now converts strip_type edges to output_type (not removes) to preserve structural context for matching
+Step 2 identifies output-only nodes as has_incoming - has_outgoing strip_type edges
+Step 3 builds input subgraph excluding output-only nodes, strips strip_type edges for matching
+Seed loop seeds all non-output-only matched nodes
+
+Arithmetic (arithmetic.py):
+
+add_init pattern has no parents — correct
+bit_add, drain, add_finalise patterns use _add_finished_op_node — correct
+add_init g2s uses _add_finished_op_node + OPERATIONAL scaffold — partially working
+
+13/33 tests passing. Open problems:
+
+add_init g2s — op cycle nodes are deleted instead of surviving. Transition needs explicit input→output node pairs for all surviving nodes, not just OPERATIONAL scaffold. The cycle nodes have no OPERATIONAL edges mapping them to output counterparts.
+bit_add/drain/add_finalise patterns fail — consequence of problem 1 (op has no cycle after add_init fires)
+tombstone_gc — parent not removed, child not getting tombstone
+Seed loop if t_input in has_outgoing may need if t_input not in output_only once problem 1 fixed — but that caused regressions this session
+
+Next session priority: Fix add_init g2s with proper input→output node pairs for all surviving structure. Verify cycle survives. Then check bit_add/drain/finalise cascade.

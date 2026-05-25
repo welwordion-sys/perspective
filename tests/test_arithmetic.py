@@ -105,7 +105,7 @@ def build_addition_graph(left_val: int, right_val: int) -> tuple[PerspectiveGrap
     g = PerspectiveGraph()
     left_root, left_lsb = build_number(g, left_val)
     right_root, right_lsb = build_number(g, right_val)
-    op_node = build_operator(g, '+', finished=False)
+    op_node, _ = build_operator(g, '+', finished=False)
     connect_operands(g, op_node, left_root, left_lsb, right_root, right_lsb)
     return g, op_node
 

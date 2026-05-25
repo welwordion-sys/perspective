@@ -1,6 +1,27 @@
 from __future__ import annotations
+from dataclasses import dataclass
 from basic_machinery.graph import PerspectiveGraph, Node, EdgeType
 from basic_machinery.operations import OperationDefinition, register
+
+
+# ---------------------------------------------------------------------------
+# Tag handle dataclass
+# ---------------------------------------------------------------------------
+
+@dataclass
+class OpTag:
+    """
+    Handles for all internal nodes of an operator/equality tag.
+    Returned by build_operator and build_equality so transition graph
+    builders can wire explicit OPERATIONAL input→output pairs for each
+    tag node.
+
+    tail is None for finished operators (no tail node exists).
+    tail is set for unfinished operators (tail = result attachment point).
+    """
+    cycle_nodes: list[Node]
+    anchor: Node
+    tail: Node | None
 
 
 # ---------------------------------------------------------------------------
@@ -24,10 +45,10 @@ def _tag_parameter(graph: PerspectiveGraph, node: Node) -> None:
     graph.add_edge(companion, node, EdgeType.STRUCTURAL)
 
 
-def _tag_cycle(graph: PerspectiveGraph, node: Node, size: int) -> None:
+def _tag_cycle(graph: PerspectiveGraph, node: Node, size: int) -> OpTag:
     """
-    Unfinished operator/equality tag.
-    Directed cycle of `size` nodes attached to node.
+    Finished operator/equality tag.
+    Directed cycle of `size` nodes attached to node. No tail.
     cycle[0] gets a left anchor node — dead-end structural edge that
     marks operand asymmetry and provides a consistent GA grammar entry point.
 
@@ -40,13 +61,15 @@ def _tag_cycle(graph: PerspectiveGraph, node: Node, size: int) -> None:
     graph.add_edge(node, cycle_nodes[0], EdgeType.STRUCTURAL)
     anchor = graph.add_node()
     graph.add_edge(cycle_nodes[0], anchor, EdgeType.STRUCTURAL)
+    return OpTag(cycle_nodes=cycle_nodes, anchor=anchor, tail=None)
 
 
-def _tag_cycle_plus(graph: PerspectiveGraph, node: Node, size: int) -> None:
+def _tag_cycle_plus(graph: PerspectiveGraph, node: Node, size: int) -> OpTag:
     """
-    Finished operator/equality tag.
+    Unfinished operator/equality tag.
     Same as _tag_cycle but cycle[size-1] also has a tail node.
-    Tail presence = finished state. Anchor off cycle[0] = left marker.
+    Tail presence = unfinished state. Tail = result attachment point.
+    Anchor off cycle[0] = left marker.
 
     node -> cycle[0] -> ... -> cycle[size-1] -> cycle[0]
                                cycle[size-1] -> tail
@@ -61,6 +84,7 @@ def _tag_cycle_plus(graph: PerspectiveGraph, node: Node, size: int) -> None:
     graph.add_edge(node, cycle_nodes[0], EdgeType.STRUCTURAL)
     anchor = graph.add_node()
     graph.add_edge(cycle_nodes[0], anchor, EdgeType.STRUCTURAL)
+    return OpTag(cycle_nodes=cycle_nodes, anchor=anchor, tail=tail)
 
 
 # ---------------------------------------------------------------------------
@@ -68,7 +92,7 @@ def _tag_cycle_plus(graph: PerspectiveGraph, node: Node, size: int) -> None:
 # ---------------------------------------------------------------------------
 
 # Unique cycle size per operator — no overloading, no ambiguity.
-# Tail presence (via _tag_cycle_plus) encodes finished state uniformly.
+# Tail presence (via _tag_cycle_plus) encodes unfinished state uniformly.
 # Sizes 1 and 2 are reserved: 1-cycle = bit value 1, 2-cycle = carry marker.
 _OPERATOR_TAGS = {
     '+': 3,
@@ -80,21 +104,32 @@ _OPERATOR_TAGS = {
 _EQUALITY_SIZE = 7
 
 
-def build_operator(graph: PerspectiveGraph, op: str, finished: bool = False) -> Node:
+def build_operator(graph: PerspectiveGraph, op: str, finished: bool = False) -> tuple[Node, OpTag]:
+    """
+    Build an operator node with its tag structure.
+    Returns (op_node, tag) where tag exposes all internal node handles
+    for use in transition graph construction.
+    finished=False: unfinished tag (tail present, result attachment point available).
+    finished=True: finished tag (no tail, no rules fire).
+    """
     if op not in _OPERATOR_TAGS:
         raise ValueError(f"Unknown operator '{op}'. Expected one of {list(_OPERATOR_TAGS)}")
     node = graph.add_node()
     size = _OPERATOR_TAGS[op]
-    tag_fn = _tag_cycle if finished else _tag_cycle_plus  # swapped
-    tag_fn(graph, node, size)
-    return node
+    tag_fn = _tag_cycle if finished else _tag_cycle_plus  # swapped: finished=True -> no tail
+    tag = tag_fn(graph, node, size)
+    return node, tag
 
 
-def build_equality(graph: PerspectiveGraph, finished: bool = False) -> Node:
+def build_equality(graph: PerspectiveGraph, finished: bool = False) -> tuple[Node, OpTag]:
+    """
+    Build an equality node with its tag structure.
+    Returns (eq_node, tag).
+    """
     node = graph.add_node()
     tag_fn = _tag_cycle if finished else _tag_cycle_plus  # swapped
-    tag_fn(graph, node, _EQUALITY_SIZE)
-    return node
+    tag = tag_fn(graph, node, _EQUALITY_SIZE)
+    return node, tag
 
 
 # ---------------------------------------------------------------------------
@@ -252,7 +287,7 @@ def _parse_equality(
     if pos < len(tokens) and tokens[pos] == '=':
         pos += 1
         right, pos = _parse_additive(graph, tokens, pos)
-        eq_node = build_equality(graph, finished=False)
+        eq_node, _ = build_equality(graph, finished=False)
         connect_equality(graph, eq_node, left[0], right[0])
         return (eq_node, eq_node), pos
     return left, pos
@@ -266,7 +301,7 @@ def _parse_additive(
         op = tokens[pos]
         pos += 1
         right, pos = _parse_multiplicative(graph, tokens, pos)
-        op_node = build_operator(graph, op)
+        op_node, _ = build_operator(graph, op)
         # left and right are (root, lsb) tuples from _parse_primary
         connect_operands(graph, op_node, left[0], left[1], right[0], right[1])
         left = op_node, op_node  # operator node is its own root and lsb placeholder
@@ -281,7 +316,7 @@ def _parse_multiplicative(
         op = tokens[pos]
         pos += 1
         right, pos = _parse_primary(graph, tokens, pos)
-        op_node = build_operator(graph, op)
+        op_node, _ = build_operator(graph, op)
         connect_operands(graph, op_node, left[0], left[1], right[0], right[1])
         left = op_node, op_node
     return left, pos
@@ -335,7 +370,7 @@ def _make_neutral_collapse_rule(
     """
     # --- Pattern ---
     p = PerspectiveGraph()
-    op_node = build_operator(p, op, finished=False)
+    op_node, _ = build_operator(p, op, finished=False)
     _, neutral_lsb = build_number(p, neutral_value)
     survivor_node = p.add_node()
     p.add_edge(op_node, neutral_lsb, EdgeType.OPERATIONAL)
@@ -374,7 +409,7 @@ def _make_zero_product_rule() -> OperationDefinition:
     """
     # --- Pattern ---
     p = PerspectiveGraph()
-    op_node = build_operator(p, '*', finished=False)
+    op_node, _ = build_operator(p, '*', finished=False)
     _, zero_lsb = build_number(p, 0)
     other_node = p.add_node()
     p.add_edge(op_node, zero_lsb, EdgeType.OPERATIONAL)

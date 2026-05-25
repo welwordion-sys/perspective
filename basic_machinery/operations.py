@@ -59,9 +59,10 @@ def _mapping_is_valid(
 def match(
     pattern: PerspectiveGraph,
     graph: PerspectiveGraph,
+    candidates: list[Node] | None = None,
 ) -> MatchResult:
     pattern_nodes = list(pattern.nodes)
-    graph_nodes = list(graph.nodes)
+    graph_nodes = candidates if candidates is not None else list(graph.nodes)
     if len(pattern_nodes) > len(graph_nodes):
         return MatchResult(success=False)
     for mapping in _candidate_mappings(pattern_nodes, graph_nodes):
@@ -91,134 +92,226 @@ def revert(graph: PerspectiveGraph, snap: PerspectiveGraph) -> None:
     graph.restore(snap)
 
 
-def _build_retyped_subgraph(
-    source: PerspectiveGraph,
-    nodes: set[Node],
-    strip_type: EdgeType,
-) -> PerspectiveGraph:
-    """Build a subgraph of source restricted to nodes, excluding strip_type edges.
-    Used to build the input subgraph for matching — only structural context,
-    no mapping edges."""
-    g = PerspectiveGraph()
-    g._nodes = set(nodes)
-    g._next_id = source._next_id
-    for edge in source.edges:
-        if edge.source in nodes and edge.target in nodes:
-            if edge.edge_type != strip_type:
-                g._edges.add(Edge(
-                    source=edge.source,
-                    target=edge.target,
-                    edge_type=edge.edge_type,
-                ))
-    return g
-
-
 def _apply_pass(
     graph: PerspectiveGraph,
     node_map: dict[Node, Node],
     transition: PerspectiveGraph,
-    strip_type: EdgeType,
 ) -> dict[Node, Node]:
-    output_type = (
-        EdgeType.OPERATIONAL
-        if strip_type == EdgeType.STRUCTURAL
-        else EdgeType.STRUCTURAL
-    )
+    """
+    Apply one transformation pass using the transition graph.
+
+    The transition graph encodes:
+      - Input side: mirrors the real matched subgraph topology, with operational
+        edges represented as marker chains (A->[S]->m->[S]->B, m->[OP]->m).
+      - Output side: describes the desired final state of surviving nodes.
+        STRUCTURAL edges are written as STRUCTURAL. Marker chains in the output
+        side are written as OPERATIONAL edges into the real graph.
+      - OPERATIONAL edges in the transition (non-self-loop): input->output mapping.
+
+    Steps:
+      1. Insert marker nodes for operational edges in real matched subgraph.
+      2. Classify transition nodes (input vs output, excluding transition markers).
+      3. Match transition input subgraph against real matched subgraph.
+         Candidate pool excludes marker nodes.
+      4. Follow OPERATIONAL edges in transition to build output_map.
+         Collect nodes_to_delete and nodes_to_merge.
+      4b. Delete merged nodes (rewriting edges to survivor).
+          Delete nodes with no output.
+          Remove all marker nodes.
+      5. Write edges from transition output side into real graph.
+         Plain STRUCTURAL edges -> STRUCTURAL.
+         Marker chains -> OPERATIONAL.
+    """
     matched_target_nodes = set(node_map.values())
 
-    # Step 1: convert strip_type edges to output_type in matched subgraph.
-    # Recorded for reattachment. Converting instead of removing preserves
-    # structural context so input subgraph matching is unambiguous.
-    stripped_edges = []
+    # ------------------------------------------------------------------
+    # Step 1: Insert marker nodes for OPERATIONAL edges in matched subgraph.
+    # A->[OP]->B becomes A->[S]->m, m->[S]->B, m->[OP]->m
+    # Self-loops (e.g. tombstone) are left unchanged.
+    # ------------------------------------------------------------------
+    marker_nodes: set[Node] = set()
     for edge in list(graph.edges):
         if (
-            edge.edge_type == strip_type
+            edge.edge_type == EdgeType.OPERATIONAL
+            and edge.source != edge.target
             and edge.source in matched_target_nodes
             and edge.target in matched_target_nodes
         ):
-            stripped_edges.append(edge)
             graph.remove_edge(edge)
-            graph.add_edge(edge.source, edge.target, output_type)
+            m = graph.add_node()
+            marker_nodes.add(m)
+            graph.add_edge(edge.source, m, EdgeType.STRUCTURAL)
+            graph.add_edge(m, edge.target, EdgeType.STRUCTURAL)
+            graph.add_edge(m, m, EdgeType.OPERATIONAL)
 
-    # Step 2: identify output-only nodes in transition.
-    # Output-only = have incoming strip_type edges but no outgoing strip_type edges.
-    # Input subgraph = all transition nodes except output-only nodes.
+    # ------------------------------------------------------------------
+    # Step 2: Classify transition nodes.
+    # OPERATIONAL non-self-loop edges define input (has_outgoing) and
+    # output (has_incoming) sets. Transition nodes with operational
+    # self-loops are markers — excluded from input/output classification.
+    # ------------------------------------------------------------------
     has_outgoing: set[Node] = set()
     has_incoming: set[Node] = set()
     for edge in transition.edges:
-        if edge.edge_type == strip_type:
+        if edge.edge_type == EdgeType.OPERATIONAL and edge.source != edge.target:
             has_outgoing.add(edge.source)
             has_incoming.add(edge.target)
     output_only = has_incoming - has_outgoing
-    input_nodes = set(transition.nodes) - output_only
+    transition_markers: set[Node] = {
+        n for n in transition.nodes
+        if Edge(source=n, target=n, edge_type=EdgeType.OPERATIONAL) in transition
+    }
+    input_nodes = set(transition.nodes) - output_only - transition_markers
 
-    # Step 3: match input subgraph (strip_type retyped as output_type) against
-    # matched subgraph (which also has strip_type converted to output_type).
-    retyped_input = _build_retyped_subgraph(transition, input_nodes, strip_type)
-    matched_subgraph = graph.subgraph(matched_target_nodes)
-    input_match = match(retyped_input, matched_subgraph)
-    with open('debug_out.txt', 'a') as f:
-        f.write(f"strip={strip_type} input_nodes={len(input_nodes)} retyped_input nodes={len(list(retyped_input.nodes))} edges={len(list(retyped_input.edges))} matched_subgraph nodes={len(list(matched_subgraph.nodes))} edges={len(list(matched_subgraph.edges))} match={input_match.success} map={input_match.node_map}\n")
+    # ------------------------------------------------------------------
+    # Step 3: Match transition input subgraph against real matched subgraph.
+    # Marker nodes excluded from candidate pool.
+    # ------------------------------------------------------------------
+    input_subgraph = transition.subgraph(input_nodes)
+    matched_subgraph = graph.subgraph(matched_target_nodes | marker_nodes)
+    non_marker_candidates = list(matched_target_nodes)
+    input_match = match(input_subgraph, matched_subgraph, candidates=non_marker_candidates)
+
     if not input_match.success:
-        # Revert conversion
-        for edge in stripped_edges:
-            temp = Edge(source=edge.source, target=edge.target, edge_type=output_type)
-            if temp in graph:
-                graph.remove_edge(temp)
-            graph.add_edge(edge.source, edge.target, strip_type)
-        return node_map
-
-    # Step 4: follow strip_type edges to build output_node_map
-    output_node_map: dict[Node, Node] = {}
-    visited: set[Node] = set()
-
-    def follow_mapping(t_node: Node, target: Node) -> None:
-        if t_node in visited:
-            return
-        visited.add(t_node)
-        output_node_map[t_node] = target
-        for edge in transition.edges_from(t_node, strip_type):
-            if edge.target not in output_node_map:
-                if edge.target in input_match.node_map:
-                    follow_mapping(edge.target, input_match.node_map[edge.target])
-                else:
-                    follow_mapping(edge.target, graph.add_node())
-
-    for t_input, target in input_match.node_map.items():
-        if t_input in has_outgoing:
-            follow_mapping(t_input, target)
-
-    # Step 4b: remove unmapped nodes from target graph
-    for target_node in matched_target_nodes:
-        if target_node not in output_node_map.values():
+        # Revert step 1: restore original operational edges, remove markers
+        for m in list(marker_nodes):
+            incoming = [e for e in graph.edges if e.target == m and e.source != m]
+            outgoing = [e for e in graph.edges if e.source == m and e.target != m]
             for edge in list(graph.edges):
-                if edge.source == target_node or edge.target == target_node:
+                if edge.source == m or edge.target == m:
                     graph.remove_edge(edge)
-            graph.remove_node(target_node)
+            if incoming and outgoing:
+                graph.add_edge(incoming[0].source, outgoing[0].target, EdgeType.OPERATIONAL)
+            graph.remove_node(m)
+        return node_map
+    print(f"input_match: { {k.id: v.id for k, v in input_match.node_map.items()} }")
+    print(f"has_outgoing: {sorted(n.id for n in has_outgoing)}")
 
-    # Step 5: write output_type edges from transition into target graph
-    for edge in transition.edges:
-        if edge.edge_type != output_type:
+    # ------------------------------------------------------------------
+    # Step 4: Follow OPERATIONAL edges in transition to build output_map.
+    # output_map: transition output node -> real node
+    # nodes_to_delete: input nodes with no outgoing OPERATIONAL edge (consumed)
+    # nodes_to_merge: real node -> survivor
+    # ------------------------------------------------------------------
+    output_map: dict[Node, Node] = {}
+    nodes_to_delete: set[Node] = set()
+    nodes_to_merge: dict[Node, Node] = {}
+
+    def follow_mapping(t_input: Node, real: Node) -> None:
+        current_real = real
+        # Only non-self-loop OPERATIONAL edges are mapping edges
+        edges_from = [
+            e for e in transition.edges_from(t_input, EdgeType.OPERATIONAL)
+            if e.target != t_input
+        ]
+        print(f"follow_mapping t_input={t_input.id} real={real.id} edges_from={[e.target.id for e in edges_from]}")
+        for i, edge in enumerate(edges_from):
+            t_out = edge.target
+            if t_out not in output_map:
+                output_map[t_out] = current_real
+                if i < len(edges_from) - 1:
+                    current_real = graph.add_node()
+            else:
+                existing_real = output_map[t_out]
+                if current_real != existing_real:
+                    nodes_to_merge[current_real] = existing_real
+
+    for t_input, real in input_match.node_map.items():
+        if t_input in has_outgoing:
+            follow_mapping(t_input, real)
+        else:
+            nodes_to_delete.add(real)
+    print(f"nodes_to_delete: {sorted(n.id for n in nodes_to_delete)}")
+    print(f"output_map after step 4: { {k.id: v.id for k, v in output_map.items()} }")
+    # ------------------------------------------------------------------
+    # Step 4b: Merge, delete, clean up markers.
+    # ------------------------------------------------------------------
+
+    # Merge: rewrite edges to survivor, remove merged node
+    for real_node, survivor in nodes_to_merge.items():
+        for edge in list(graph.edges):
+            if edge.source == real_node or edge.target == real_node:
+                graph.remove_edge(edge)
+                new_src = survivor if edge.source == real_node else edge.source
+                new_tgt = survivor if edge.target == real_node else edge.target
+                candidate = Edge(source=new_src, target=new_tgt, edge_type=edge.edge_type)
+                if candidate not in graph:
+                    graph.add_edge(new_src, new_tgt, edge.edge_type)
+        if real_node in graph:
+            graph.remove_node(real_node)
+
+    # Delete: remove all edges then remove node
+    for real_node in nodes_to_delete:
+        if real_node not in graph:
             continue
-        source = output_node_map.get(edge.source)
-        target = output_node_map.get(edge.target)
-        if source is not None and target is not None:
-            candidate = Edge(source=source, target=target, edge_type=output_type)
-            if candidate not in graph:
-                graph.add_edge(source, target, output_type)
+        for edge in list(graph.edges):
+            if edge.source == real_node or edge.target == real_node:
+                graph.remove_edge(edge)
+        graph.remove_node(real_node)
 
-    # Step 6: reattach as strip_type where both endpoints survived.
-    # Remove temporary output_type conversion and restore as strip_type.
-    for edge in stripped_edges:
-        new_source = output_node_map.get(edge.source)
-        new_target = output_node_map.get(edge.target)
-        if new_source is not None and new_target is not None:
-            temp = Edge(source=new_source, target=new_target, edge_type=output_type)
-            if temp in graph:
-                graph.remove_edge(temp)
-            graph.add_edge(new_source, new_target, strip_type)
+    # Remove marker nodes (always temporary)
+    for m in marker_nodes:
+        if m not in graph:
+            continue
+        for edge in list(graph.edges):
+            if edge.source == m or edge.target == m:
+                graph.remove_edge(edge)
+        graph.remove_node(m)
 
-    return output_node_map
+    # ------------------------------------------------------------------
+    # Step 5: Write edges from transition output side into real graph.
+    # Plain STRUCTURAL edges -> STRUCTURAL in real graph.
+    # Marker chains (A->[S]->m->[S]->B, m->[OP]->m) -> OPERATIONAL in real graph.
+    # ------------------------------------------------------------------
+    # Identify transition marker nodes and collect nodes involved in marker chains
+    marker_chain_nodes: set[Node] = set()
+    for t_marker in transition_markers:
+        incoming = [
+            e for e in transition.edges
+            if e.target == t_marker
+            and e.source != t_marker
+            and e.edge_type == EdgeType.STRUCTURAL
+        ]
+        outgoing = [
+            e for e in transition.edges
+            if e.source == t_marker
+            and e.target != t_marker
+            and e.edge_type == EdgeType.STRUCTURAL
+        ]
+        for inc in incoming:
+            for out in outgoing:
+                src_real = output_map.get(inc.source)
+                tgt_real = output_map.get(out.target)
+                if src_real is not None and tgt_real is not None:
+                    candidate = Edge(source=src_real, target=tgt_real, edge_type=EdgeType.OPERATIONAL)
+                    if candidate not in graph:
+                        graph.add_edge(src_real, tgt_real, EdgeType.OPERATIONAL)
+        marker_chain_nodes.add(t_marker)
+        for inc in incoming:
+            marker_chain_nodes.add(inc.source)
+        for out in outgoing:
+            marker_chain_nodes.add(out.target)
+
+    # Write remaining STRUCTURAL edges (not part of marker chains)
+    print(f"transition total edges: {len(list(transition.edges))}")
+    print(f"transition structural edges total: {len([e for e in transition.edges if e.edge_type == EdgeType.STRUCTURAL])}")
+    print(f"transition_markers: {[n.id for n in transition_markers]}")
+    print(f"output_map keys: {sorted(k.id for k in output_map)}")
+
+    for edge in transition.edges:
+        if edge.edge_type != EdgeType.STRUCTURAL:
+            continue
+        print(f"  t:{edge.source.id}→t:{edge.target.id}  src_in_map={edge.source in output_map}  tgt_in_map={edge.target in output_map}  marker_skip={edge.source in transition_markers or edge.target in transition_markers}")
+        if edge.source in transition_markers or edge.target in transition_markers:
+            continue
+        source = output_map.get(edge.source)
+        target = output_map.get(edge.target)
+        if source is None or target is None:
+            continue
+        candidate = Edge(source=source, target=target, edge_type=EdgeType.STRUCTURAL)
+        if candidate not in graph:
+            graph.add_edge(source, target, EdgeType.STRUCTURAL)
+    return output_map
 
 
 def apply(
@@ -229,20 +322,18 @@ def apply(
     if not result.success:
         return False
 
-    # Pass 1: convert operational to structural, output structural — fires graph2s
+    # Pass 1: graph2s — structural rewrite
     updated_map = _apply_pass(
         graph,
         result.node_map,
         operation.graph2s,
-        strip_type=EdgeType.OPERATIONAL,
     )
 
-    # Pass 2: convert structural to operational, output operational — fires graph2o
+    # Pass 2: graph2o — operational rewrite
     _apply_pass(
         graph,
         updated_map,
         operation.graph2o,
-        strip_type=EdgeType.STRUCTURAL,
     )
 
     return True
