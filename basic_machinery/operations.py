@@ -91,6 +91,7 @@ def _mapping_is_valid(
                 ]
                 pattern_edges = list(pattern.edges_from(pattern_node, edge_type))
                 if len(real_edges) != len(pattern_edges):
+                    print(f"  exact fail: real={real_node.id} pattern={pattern_node.id} edge_type={edge_type} real_count={len(real_edges)} pattern_count={len(pattern_edges)}")
                     return False
     return True
 
@@ -104,6 +105,7 @@ def match(
 ) -> MatchResult:
     pattern_nodes = list(pattern.nodes)
     graph_nodes = candidates if candidates is not None else list(graph.nodes)
+    print(f"match: pattern={len(pattern_nodes)} candidates={len(graph_nodes)}")
     if len(pattern_nodes) > len(graph_nodes):
         return MatchResult(success=False)
     for mapping in _candidate_mappings(pattern_nodes, graph_nodes):
@@ -211,7 +213,9 @@ def _apply_pass(
     output_only = has_incoming - has_outgoing
     excluded = transition_markers | transition_placeholders
     input_nodes = set(transition.nodes) - output_only - excluded
-
+    print(f"transition_markers: {[n.id for n in transition_markers]}")
+    print(f"transition_placeholders: {[n.id for n in transition_placeholders]}")
+    print(f"input_nodes: {sorted(n.id for n in input_nodes)}")
     # ------------------------------------------------------------------
     # Step 3: Exact-match transition input subgraph against real graph.
     # Candidates = matched_target_nodes | marker_nodes (not placeholder targets).
@@ -224,27 +228,52 @@ def _apply_pass(
     all_candidates = list(matched_target_nodes | marker_nodes) + list(graph.nodes - matched_target_nodes - marker_nodes)
     real_candidates = matched_target_nodes | marker_nodes
 
+    # Split input nodes into real input nodes and placeholder nodes
+    input_only_nodes = input_nodes  # excludes placeholders and markers
+    input_subgraph = transition.subgraph(input_only_nodes | transition_markers)
+
+    # Match only real input nodes against real candidates
+    real_candidates_list = list(matched_target_nodes | marker_nodes)
     input_match = match(
         input_subgraph,
-        graph,
-        candidates=all_candidates,
+        graph.subgraph(matched_target_nodes | marker_nodes),
+        candidates=real_candidates_list,
         exact=True,
         real_candidates=real_candidates,
     )
 
+    # Verify placeholder constraints: each boundary node must have at least
+    # one external edge in the real graph (edge to node outside real_candidates)
+    if input_match.success:
+        for t_node, real_node in input_match.node_map.items():
+            has_placeholder_edge = any(
+                e.target in transition_placeholders
+                for e in transition.edges_from(t_node, EdgeType.STRUCTURAL)
+            )
+            if has_placeholder_edge:
+                has_external = any(
+                    e.target not in real_candidates
+                    for e in graph.edges_from(real_node, EdgeType.STRUCTURAL)
+                )
+                if not has_external:
+                    input_match = MatchResult(success=False)
+                    break
+
     if not input_match.success:
-        # Revert step 1: restore original operational edges, remove markers
         for m in list(marker_nodes):
             incoming = [e for e in graph.edges if e.target == m and e.source != m]
             outgoing = [e for e in graph.edges if e.source == m and e.target != m]
+            print(f"reverting marker {m.id}: incoming={[(e.source.id, e.target.id) for e in incoming]} outgoing={[(e.source.id, e.target.id) for e in outgoing]}")
             for edge in list(graph.edges):
                 if edge.source == m or edge.target == m:
                     graph.remove_edge(edge)
             if incoming and outgoing:
                 graph.add_edge(incoming[0].source, outgoing[0].target, EdgeType.OPERATIONAL)
             graph.remove_node(m)
+        print(f"MATCH FAILED — reverting")
         return node_map
 
+    print(f"input_match: { {k.id: v.id for k, v in input_match.node_map.items()} }")
     # ------------------------------------------------------------------
     # Step 4: Follow OPERATIONAL edges in transition to build output_map.
     # Only process input nodes that are in real_candidates (not placeholder/external).
