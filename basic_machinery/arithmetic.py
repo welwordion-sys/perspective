@@ -50,23 +50,22 @@ def _add_result_node(p: PerspectiveGraph, op_node: Node) -> Node:
     return result
 
 
-def _make_input_graph(pattern: PerspectiveGraph) -> tuple[PerspectiveGraph, dict[Node, Node]]:
+def _make_input_graph(
+    pattern: PerspectiveGraph,
+    boundary_nodes: set[Node] | None = None,
+) -> tuple[PerspectiveGraph, dict[Node, Node]]:
     """
     Clone pattern and encode OPERATIONAL edges as marker chains.
-    Returns (input_graph, node_map) where node_map maps pattern nodes → input nodes.
-
-    The input graph is the input side of a transition graph — it must mirror
-    exactly what the real graph's matched subgraph looks like after step 1's
-    marker insertion. Step 1 converts each OPERATIONAL edge A→B into:
-        A→[S]→marker→[S]→B  with  marker→[OP]→marker (operational self-loop)
+    Returns (input_graph, node_map) where node_map maps pattern nodes -> input nodes.
 
     STRUCTURAL edges are copied unchanged.
-    OPERATIONAL self-loops (source == target) are copied as STRUCTURAL self-loops —
-    they represent node identity signals (e.g. tombstone pattern), not traversal edges,
-    and are matched before step 1 fires so no marker conversion is needed.
+    OPERATIONAL self-loops are copied as STRUCTURAL self-loops (identity signals).
+    OPERATIONAL edges A->B become marker chains: A->[S]->m->[S]->B, m->[OP]->m.
 
-    node_map covers only the real pattern nodes — marker nodes inserted here
-    are internal to the encoding and not referenced by rule builders.
+    boundary_nodes: pattern nodes with external connections in the real graph.
+    A single shared placeholder node (structural + operational self-loop) is added,
+    and each boundary node gets a structural edge to it. This encodes external
+    attachment without specifying the external node's identity.
     """
     g = PerspectiveGraph()
     node_map: dict[Node, Node] = {}
@@ -78,19 +77,24 @@ def _make_input_graph(pattern: PerspectiveGraph) -> tuple[PerspectiveGraph, dict
         if edge.edge_type == EdgeType.STRUCTURAL:
             g.add_edge(src, tgt, EdgeType.STRUCTURAL)
         elif edge.source == edge.target:
-            # Operational self-loop — identity signal, not a traversal edge.
-            # Convert to structural self-loop so the pattern topology is preserved
-            # for matching (pattern match runs before step 1, so the real graph
-            # still has the operational self-loop at match time; this conversion
-            # only affects the transition input subgraph used in step 3).
+            # Operational self-loop — identity signal, convert to structural
             g.add_edge(src, tgt, EdgeType.STRUCTURAL)
         else:
-            # OPERATIONAL edge A→B: encode as marker chain A→[S]→m→[S]→B
-            # with m→[OP]→m to signal this was a converted operational edge.
+            # OPERATIONAL edge A->B: encode as marker chain A->[S]->m->[S]->B
             m = g.add_node()
             g.add_edge(src, m, EdgeType.STRUCTURAL)
             g.add_edge(m, tgt, EdgeType.STRUCTURAL)
             g.add_edge(m, m, EdgeType.OPERATIONAL)
+
+    # Add placeholder node for boundary nodes.
+    # Signature: structural self-loop + operational self-loop (unique in the system).
+    if boundary_nodes:
+        placeholder = g.add_node()
+        g.add_edge(placeholder, placeholder, EdgeType.STRUCTURAL)
+        g.add_edge(placeholder, placeholder, EdgeType.OPERATIONAL)
+        for bn in boundary_nodes:
+            g.add_edge(node_map[bn], placeholder, EdgeType.STRUCTURAL)
+
     return g, node_map
 
 
@@ -131,13 +135,6 @@ def _add_unfinished_tag_output(
 # ---------------------------------------------------------------------------
 # add_init rules (4 rules)
 # ---------------------------------------------------------------------------
-# Pattern: unfinished op + left LSB + right LSB. No result node yet.
-# graph2s input: clone of pattern with OPERATIONAL→STRUCTURAL.
-# graph2s output: finished op tag nodes + result node (cloned from tail).
-#   Tail input → result output. Left/right inputs have no output → deleted.
-# graph2o input: clone of post-graph2s state.
-# graph2o output: op→left, op→right, op→result operational edges.
-# ---------------------------------------------------------------------------
 
 def _make_add_init_rule(left_bit: int, right_bit: int) -> OperationDefinition:
     result_bit = (left_bit + right_bit) % 2
@@ -153,9 +150,10 @@ def _make_add_init_rule(left_bit: int, right_bit: int) -> OperationDefinition:
     p.add_edge(op_node, right_pos, EdgeType.OPERATIONAL)
 
     # --- graph2s ---
-    # Input side: clone of pattern with OPERATIONAL→STRUCTURAL
-    g2s, p2g = _make_input_graph(p)
-    # Mapped input nodes
+    # op_node is boundary — it has a parent outside the matched set.
+    # left_pos and right_pos are boundary — they will be pointed at by the
+    # op node's operational edges which come from outside after pass 2.
+    g2s, p2g = _make_input_graph(p, boundary_nodes={op_node})
     in_op = p2g[op_node]
     in_cycles = [p2g[c] for c in op_tag.cycle_nodes]
     in_anchor = p2g[op_tag.anchor]
@@ -171,8 +169,7 @@ def _make_add_init_rule(left_bit: int, right_bit: int) -> OperationDefinition:
     out_right = g2s.add_node()
     out_result = g2s.add_node()
 
-    # OPERATIONAL input→output pairs
-    # op, cycle nodes, anchor, left, right survive; tail→result (clone)
+    # OPERATIONAL input->output pairs
     g2s.add_edge(in_op, out_op, EdgeType.OPERATIONAL)
     for ic, oc in zip(in_cycles, out_cycles):
         g2s.add_edge(ic, oc, EdgeType.OPERATIONAL)
@@ -184,7 +181,6 @@ def _make_add_init_rule(left_bit: int, right_bit: int) -> OperationDefinition:
     # STRUCTURAL output: finished op tag topology
     out_tag = OpTag(cycle_nodes=out_cycles, anchor=out_anchor, tail=None)
     _add_finished_tag_output(g2s, out_op, out_tag)
-    # op→result + result bit; left and right survive bare (bit value stripped by pass)
     g2s.add_edge(out_op, out_result, EdgeType.STRUCTURAL)
     if result_bit == 1:
         g2s.add_edge(out_result, out_result, EdgeType.STRUCTURAL)
@@ -200,8 +196,6 @@ def _make_add_init_rule(left_bit: int, right_bit: int) -> OperationDefinition:
         g2s.add_edge(out_carry_b, out_carry_a, EdgeType.STRUCTURAL)
 
     # --- graph2o ---
-    # Post-graph2s state: finished op tag, op→left, op→right, op→result (STRUCTURAL),
-    # left and right retain their bit value tags, result has its bit tag.
     post = PerspectiveGraph()
     post_op, post_op_tag = _add_finished_op_node(post)
     post_left = post.add_node()
@@ -223,7 +217,8 @@ def _make_add_init_rule(left_bit: int, right_bit: int) -> OperationDefinition:
         post.add_edge(post_carry_a, post_carry_b, EdgeType.STRUCTURAL)
         post.add_edge(post_carry_b, post_carry_a, EdgeType.STRUCTURAL)
 
-    g2o, post2g = _make_input_graph(post)
+    # post_op is boundary — has parent outside match
+    g2o, post2g = _make_input_graph(post, boundary_nodes={post_op})
     in2_op = post2g[post_op]
     in2_left = post2g[post_left]
     in2_right = post2g[post_right]
@@ -246,7 +241,6 @@ def _make_add_init_rule(left_bit: int, right_bit: int) -> OperationDefinition:
         g2o.add_edge(in2_carry_a, out2_carry_a, EdgeType.OPERATIONAL)
         g2o.add_edge(in2_carry_b, out2_carry_b, EdgeType.OPERATIONAL)
 
-    # STRUCTURAL output: op tag + op→left + op→right + op→result (preserved)
     out2_op_tag = OpTag(
         cycle_nodes=[g2o.add_node() for _ in post_op_tag.cycle_nodes],
         anchor=g2o.add_node(),
@@ -263,7 +257,7 @@ def _make_add_init_rule(left_bit: int, right_bit: int) -> OperationDefinition:
     if result_bit == 1:
         g2o.add_edge(out2_result, out2_result, EdgeType.STRUCTURAL)
 
-    # OPERATIONAL output: op→left, op→right, op→result
+    # OPERATIONAL output: op->left, op->right, op->result
     g2o.add_edge(out2_op, out2_left, EdgeType.OPERATIONAL)
     g2o.add_edge(out2_op, out2_right, EdgeType.OPERATIONAL)
     g2o.add_edge(out2_op, out2_result, EdgeType.OPERATIONAL)
@@ -299,15 +293,14 @@ def _make_bit_add_rule(left_bit: int, right_bit: int, carry_in: int) -> Operatio
         carry_a, carry_b = _add_carry(p, result_node)
 
     # --- graph2s ---
-    # Input: clone of pattern with OPERATIONAL→STRUCTURAL
-    g2s, p2g = _make_input_graph(p)
+    # op_node, left_parent, right_parent are boundary nodes
+    g2s, p2g = _make_input_graph(p, boundary_nodes={op_node, left_parent, right_parent})
     in_op = p2g[op_node]
     in_cycles = [p2g[c] for c in op_tag.cycle_nodes]
     in_anchor = p2g[op_tag.anchor]
     in_left_parent = p2g[left_parent]
     in_right_parent = p2g[right_parent]
     in_result = p2g[result_node]
-    # left_pos, right_pos, carry nodes: no output → deleted
 
     out_op = g2s.add_node()
     out_cycles = [g2s.add_node() for _ in op_tag.cycle_nodes]
@@ -333,7 +326,6 @@ def _make_bit_add_rule(left_bit: int, right_bit: int, carry_in: int) -> Operatio
         g2s.add_edge(out_result, out_result, EdgeType.STRUCTURAL)
 
     # --- graph2o ---
-    # Build post-graph2s state
     post = PerspectiveGraph()
     post_op, post_op_tag = _add_finished_op_node(post)
     post_left_parent = post.add_node()
@@ -345,7 +337,8 @@ def _make_bit_add_rule(left_bit: int, right_bit: int, carry_in: int) -> Operatio
     if result_bit == 1:
         post.add_edge(post_result, post_result, EdgeType.STRUCTURAL)
 
-    g2o, post2g = _make_input_graph(post)
+    # post_op, post_left_parent, post_right_parent are boundary nodes
+    g2o, post2g = _make_input_graph(post, boundary_nodes={post_op, post_left_parent, post_right_parent})
     in2_op = post2g[post_op]
     in2_left_parent = post2g[post_left_parent]
     in2_right_parent = post2g[post_right_parent]
@@ -411,14 +404,14 @@ def _make_drain_rule(active_side: str, active_bit: int, carry_in: int) -> Operat
         carry_a, carry_b = _add_carry(p, result_node)
 
     # --- graph2s ---
-    g2s, p2g = _make_input_graph(p)
+    # op_node, active_parent, exhausted_pos are boundary nodes
+    g2s, p2g = _make_input_graph(p, boundary_nodes={op_node, active_parent, exhausted_pos})
     in_op = p2g[op_node]
     in_cycles = [p2g[c] for c in op_tag.cycle_nodes]
     in_anchor = p2g[op_tag.anchor]
     in_active_parent = p2g[active_parent]
     in_exhausted = p2g[exhausted_pos]
     in_result = p2g[result_node]
-    # active_pos, carry nodes: no output → deleted
 
     out_op = g2s.add_node()
     out_cycles = [g2s.add_node() for _ in op_tag.cycle_nodes]
@@ -463,7 +456,8 @@ def _make_drain_rule(active_side: str, active_bit: int, carry_in: int) -> Operat
     if result_bit == 1:
         post.add_edge(post_result, post_result, EdgeType.STRUCTURAL)
 
-    g2o, post2g = _make_input_graph(post)
+    # post_op, post_active_parent, post_exhausted are boundary nodes
+    g2o, post2g = _make_input_graph(post, boundary_nodes={post_op, post_active_parent, post_exhausted})
     in2_op = post2g[post_op]
     in2_active_parent = post2g[post_active_parent]
     in2_exhausted = post2g[post_exhausted]
@@ -532,12 +526,10 @@ def _make_add_finalise_rule(left_msb: int, right_msb: int, carry_in: int) -> Ope
         carry_a, carry_b = _add_carry(p, result_node)
 
     # --- graph2s ---
-    # Op node survives bare (tag deleted — cycle/anchor have no output).
-    # Result node survives. Left/right bits, carry, tag nodes: deleted.
-    g2s, p2g = _make_input_graph(p)
+    # op_node is boundary — has parent outside match
+    g2s, p2g = _make_input_graph(p, boundary_nodes={op_node})
     in_op = p2g[op_node]
     in_result = p2g[result_node]
-    # All other pattern nodes: no output → deleted
 
     out_op = g2s.add_node()
     out_result = g2s.add_node()
@@ -556,7 +548,6 @@ def _make_add_finalise_rule(left_msb: int, right_msb: int, carry_in: int) -> Ope
         g2s.add_edge(out_op, out_result, EdgeType.STRUCTURAL)
 
     # --- graph2o ---
-    # Empty — no operational edges to write.
     g2o = PerspectiveGraph()
 
     return OperationDefinition(name=name, pattern=p, graph2s=g2s, graph2o=g2o)
@@ -564,16 +555,6 @@ def _make_add_finalise_rule(left_msb: int, right_msb: int, carry_in: int) -> Ope
 
 # ---------------------------------------------------------------------------
 # tombstone_gc rule
-# ---------------------------------------------------------------------------
-# Tombstone marker: operational self-loop on node.
-# Pattern: tombstoned -OPER_SELF-> tombstoned, tombstoned -STRUCT-> child
-# graph2s: child survives with tombstone operational self-loop.
-#          OPERATIONAL scaffold: tombstoned self-loop (input node detection)
-#          OPERATIONAL output on child (written via step 5 as output_type=STRUCTURAL... 
-#          wait — Pass 1 strips OPERATIONAL, outputs STRUCTURAL)
-# NOTE: tombstone_gc is unusual — the marker IS operational and needs to survive.
-# Solution: encode child survival via OPERATIONAL scaffold edge tombstoned->child,
-# then graph2o writes the tombstone self-loop onto child.
 # ---------------------------------------------------------------------------
 
 def _make_tombstone_gc_rule() -> OperationDefinition:
@@ -585,10 +566,10 @@ def _make_tombstone_gc_rule() -> OperationDefinition:
     p.add_edge(tombstoned, child, EdgeType.STRUCTURAL)
 
     # --- graph2s ---
-    # OPERATIONAL scaffold: tombstoned->child (makes child reachable via follow_mapping)
-    # tombstoned has self-loop as input anchor, child reachable from it
-    # STRUCTURAL output: none (child survives bare structurally)
-    # tombstoned absent from structural output -> removed by step 4b
+    # tombstoned has operational self-loop in pattern — treated as identity signal
+    # in _make_input_graph (converted to structural self-loop).
+    # tombstoned is boundary — has parent outside match.
+    # child is boundary — it will be connected to after tombstone removal.
     g2s = PerspectiveGraph()
     g2s_tombstoned = g2s.add_node()
     g2s_child = g2s.add_node()
@@ -596,8 +577,6 @@ def _make_tombstone_gc_rule() -> OperationDefinition:
     g2s.add_edge(g2s_tombstoned, g2s_child, EdgeType.OPERATIONAL)
 
     # --- graph2o ---
-    # STRUCTURAL scaffold: child (bare node, input anchor)
-    # OPERATIONAL output: child gets tombstone self-loop
     g2o = PerspectiveGraph()
     g2o_child = g2o.add_node()
     g2o.add_edge(g2o_child, g2o_child, EdgeType.OPERATIONAL)

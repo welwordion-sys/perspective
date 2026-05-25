@@ -42,17 +42,56 @@ def _candidate_mappings(
         yield dict(zip(pattern_nodes, perm))
 
 
+def _is_placeholder(node: Node, graph: PerspectiveGraph) -> bool:
+    """
+    A placeholder node has both a structural self-loop and an operational self-loop.
+    Unique signature in the system — used to represent external boundary connections
+    in transition input subgraphs. Never appears in the real graph.
+    """
+    has_s = Edge(source=node, target=node, edge_type=EdgeType.STRUCTURAL) in graph
+    has_o = Edge(source=node, target=node, edge_type=EdgeType.OPERATIONAL) in graph
+    return has_s and has_o
+
+
 def _mapping_is_valid(
     mapping: dict[Node, Node],
     pattern: PerspectiveGraph,
-    graph: PerspectiveGraph
+    graph: PerspectiveGraph,
+    exact: bool = False,
+    real_candidates: set[Node] | None = None,
 ) -> bool:
+    """
+    Check if mapping is a valid (sub)graph isomorphism from pattern into graph.
+
+    exact=True: each mapped real node must have exactly the same outgoing edge
+    count per type as its pattern counterpart, excluding edges to real nodes
+    outside real_candidates (those are external edges, matched via placeholder).
+
+    Placeholder nodes in the pattern (structural+operational self-loop) are
+    wildcard boundary nodes — they can match any real node outside real_candidates.
+    The match only checks that the edge from the boundary node to the placeholder
+    exists in the real graph as an external edge (target outside real_candidates).
+    """
     for edge in pattern.edges:
         mapped_source = mapping[edge.source]
         mapped_target = mapping[edge.target]
         expected = Edge(source=mapped_source, target=mapped_target, edge_type=edge.edge_type)
         if expected not in graph:
             return False
+    if exact and real_candidates is not None:
+        reverse_mapping = {v: k for k, v in mapping.items()}
+        for real_node, pattern_node in reverse_mapping.items():
+            if real_node not in real_candidates:
+                continue  # placeholder or external node — skip count check
+            for edge_type in (EdgeType.STRUCTURAL, EdgeType.OPERATIONAL):
+                # Count real edges excluding those going to external nodes
+                real_edges = [
+                    e for e in graph.edges_from(real_node, edge_type)
+                    if e.target in real_candidates or e.target == real_node
+                ]
+                pattern_edges = list(pattern.edges_from(pattern_node, edge_type))
+                if len(real_edges) != len(pattern_edges):
+                    return False
     return True
 
 
@@ -60,13 +99,15 @@ def match(
     pattern: PerspectiveGraph,
     graph: PerspectiveGraph,
     candidates: list[Node] | None = None,
+    exact: bool = False,
+    real_candidates: set[Node] | None = None,
 ) -> MatchResult:
     pattern_nodes = list(pattern.nodes)
     graph_nodes = candidates if candidates is not None else list(graph.nodes)
     if len(pattern_nodes) > len(graph_nodes):
         return MatchResult(success=False)
     for mapping in _candidate_mappings(pattern_nodes, graph_nodes):
-        if _mapping_is_valid(mapping, pattern, graph):
+        if _mapping_is_valid(mapping, pattern, graph, exact=exact, real_candidates=real_candidates):
             return MatchResult(success=True, node_map=mapping)
     return MatchResult(success=False)
 
@@ -102,22 +143,24 @@ def _apply_pass(
 
     The transition graph encodes:
       - Input side: mirrors the real matched subgraph topology, with operational
-        edges represented as marker chains (A->[S]->m->[S]->B, m->[OP]->m).
+        edges represented as marker chains (A->[S]->m->[S]->B, m->[OP]->m),
+        and boundary nodes connected to a shared placeholder (structural+operational
+        self-loop) representing external connections.
       - Output side: describes the desired final state of surviving nodes.
-        STRUCTURAL edges are written as STRUCTURAL. Marker chains in the output
-        side are written as OPERATIONAL edges into the real graph.
-      - OPERATIONAL edges in the transition (non-self-loop): input->output mapping.
+        STRUCTURAL edges written as STRUCTURAL. Marker chains written as OPERATIONAL.
+      - OPERATIONAL non-self-loop edges: input->output mapping instructions.
 
     Steps:
       1. Insert marker nodes for operational edges in real matched subgraph.
-      2. Classify transition nodes (input vs output, excluding transition markers).
-      3. Match transition input subgraph against real matched subgraph.
-         Candidate pool excludes marker nodes.
+      2. Classify transition nodes (input vs output, excluding transition markers
+         and the placeholder).
+      3. Exact-match transition input subgraph against real graph.
+         Candidate pool = matched_target_nodes | marker_nodes.
+         Placeholder nodes in transition match real external nodes (outside candidates).
+         Exact count check excludes edges to external nodes (matched via placeholder).
       4. Follow OPERATIONAL edges in transition to build output_map.
          Collect nodes_to_delete and nodes_to_merge.
-      4b. Delete merged nodes (rewriting edges to survivor).
-          Delete nodes with no output.
-          Remove all marker nodes.
+      4b. Delete merged nodes, delete unconsumed nodes, remove marker nodes.
       5. Write edges from transition output side into real graph.
          Plain STRUCTURAL edges -> STRUCTURAL.
          Marker chains -> OPERATIONAL.
@@ -127,7 +170,7 @@ def _apply_pass(
     # ------------------------------------------------------------------
     # Step 1: Insert marker nodes for OPERATIONAL edges in matched subgraph.
     # A->[OP]->B becomes A->[S]->m, m->[S]->B, m->[OP]->m
-    # Self-loops (e.g. tombstone) are left unchanged.
+    # Self-loops left unchanged.
     # ------------------------------------------------------------------
     marker_nodes: set[Node] = set()
     for edge in list(graph.edges):
@@ -146,10 +189,19 @@ def _apply_pass(
 
     # ------------------------------------------------------------------
     # Step 2: Classify transition nodes.
-    # OPERATIONAL non-self-loop edges define input (has_outgoing) and
-    # output (has_incoming) sets. Transition nodes with operational
-    # self-loops are markers — excluded from input/output classification.
+    # Exclude transition markers (operational self-loop only) and
+    # placeholder nodes (both self-loops) from classification.
     # ------------------------------------------------------------------
+    transition_markers: set[Node] = set()
+    transition_placeholders: set[Node] = set()
+    for n in transition.nodes:
+        has_s = Edge(source=n, target=n, edge_type=EdgeType.STRUCTURAL) in transition
+        has_o = Edge(source=n, target=n, edge_type=EdgeType.OPERATIONAL) in transition
+        if has_s and has_o:
+            transition_placeholders.add(n)
+        elif has_o:
+            transition_markers.add(n)
+
     has_outgoing: set[Node] = set()
     has_incoming: set[Node] = set()
     for edge in transition.edges:
@@ -157,20 +209,28 @@ def _apply_pass(
             has_outgoing.add(edge.source)
             has_incoming.add(edge.target)
     output_only = has_incoming - has_outgoing
-    transition_markers: set[Node] = {
-        n for n in transition.nodes
-        if Edge(source=n, target=n, edge_type=EdgeType.OPERATIONAL) in transition
-    }
-    input_nodes = set(transition.nodes) - output_only - transition_markers
+    excluded = transition_markers | transition_placeholders
+    input_nodes = set(transition.nodes) - output_only - excluded
 
     # ------------------------------------------------------------------
-    # Step 3: Match transition input subgraph against real matched subgraph.
-    # Marker nodes excluded from candidate pool.
+    # Step 3: Exact-match transition input subgraph against real graph.
+    # Candidates = matched_target_nodes | marker_nodes (not placeholder targets).
+    # Placeholder nodes in transition can match any real node outside candidates.
+    # Exact count excludes edges to external nodes.
     # ------------------------------------------------------------------
-    input_subgraph = transition.subgraph(input_nodes)
-    matched_subgraph = graph.subgraph(matched_target_nodes | marker_nodes)
-    non_marker_candidates = list(matched_target_nodes)
-    input_match = match(input_subgraph, matched_subgraph, candidates=non_marker_candidates)
+    # Include placeholder nodes in input_subgraph so edge counts to placeholder
+    # are visible during matching.
+    input_subgraph = transition.subgraph(input_nodes | transition_markers | transition_placeholders)
+    all_candidates = list(matched_target_nodes | marker_nodes) + list(graph.nodes - matched_target_nodes - marker_nodes)
+    real_candidates = matched_target_nodes | marker_nodes
+
+    input_match = match(
+        input_subgraph,
+        graph,
+        candidates=all_candidates,
+        exact=True,
+        real_candidates=real_candidates,
+    )
 
     if not input_match.success:
         # Revert step 1: restore original operational edges, remove markers
@@ -184,13 +244,12 @@ def _apply_pass(
                 graph.add_edge(incoming[0].source, outgoing[0].target, EdgeType.OPERATIONAL)
             graph.remove_node(m)
         return node_map
-    print(f"input_match: { {k.id: v.id for k, v in input_match.node_map.items()} }")
-    print(f"has_outgoing: {sorted(n.id for n in has_outgoing)}")
 
     # ------------------------------------------------------------------
     # Step 4: Follow OPERATIONAL edges in transition to build output_map.
+    # Only process input nodes that are in real_candidates (not placeholder/external).
     # output_map: transition output node -> real node
-    # nodes_to_delete: input nodes with no outgoing OPERATIONAL edge (consumed)
+    # nodes_to_delete: input nodes with no output (consumed)
     # nodes_to_merge: real node -> survivor
     # ------------------------------------------------------------------
     output_map: dict[Node, Node] = {}
@@ -199,12 +258,10 @@ def _apply_pass(
 
     def follow_mapping(t_input: Node, real: Node) -> None:
         current_real = real
-        # Only non-self-loop OPERATIONAL edges are mapping edges
         edges_from = [
             e for e in transition.edges_from(t_input, EdgeType.OPERATIONAL)
             if e.target != t_input
         ]
-        print(f"follow_mapping t_input={t_input.id} real={real.id} edges_from={[e.target.id for e in edges_from]}")
         for i, edge in enumerate(edges_from):
             t_out = edge.target
             if t_out not in output_map:
@@ -217,12 +274,13 @@ def _apply_pass(
                     nodes_to_merge[current_real] = existing_real
 
     for t_input, real in input_match.node_map.items():
+        if real not in real_candidates:
+            continue  # placeholder assignment — skip, not a real matched node
         if t_input in has_outgoing:
             follow_mapping(t_input, real)
         else:
             nodes_to_delete.add(real)
-    print(f"nodes_to_delete: {sorted(n.id for n in nodes_to_delete)}")
-    print(f"output_map after step 4: { {k.id: v.id for k, v in output_map.items()} }")
+
     # ------------------------------------------------------------------
     # Step 4b: Merge, delete, clean up markers.
     # ------------------------------------------------------------------
@@ -260,11 +318,9 @@ def _apply_pass(
 
     # ------------------------------------------------------------------
     # Step 5: Write edges from transition output side into real graph.
-    # Plain STRUCTURAL edges -> STRUCTURAL in real graph.
-    # Marker chains (A->[S]->m->[S]->B, m->[OP]->m) -> OPERATIONAL in real graph.
+    # Plain STRUCTURAL edges -> STRUCTURAL.
+    # Marker chains (A->[S]->m->[S]->B, m->[OP]->m) -> OPERATIONAL.
     # ------------------------------------------------------------------
-    # Identify transition marker nodes and collect nodes involved in marker chains
-    marker_chain_nodes: set[Node] = set()
     for t_marker in transition_markers:
         incoming = [
             e for e in transition.edges
@@ -286,24 +342,14 @@ def _apply_pass(
                     candidate = Edge(source=src_real, target=tgt_real, edge_type=EdgeType.OPERATIONAL)
                     if candidate not in graph:
                         graph.add_edge(src_real, tgt_real, EdgeType.OPERATIONAL)
-        marker_chain_nodes.add(t_marker)
-        for inc in incoming:
-            marker_chain_nodes.add(inc.source)
-        for out in outgoing:
-            marker_chain_nodes.add(out.target)
-
-    # Write remaining STRUCTURAL edges (not part of marker chains)
-    print(f"transition total edges: {len(list(transition.edges))}")
-    print(f"transition structural edges total: {len([e for e in transition.edges if e.edge_type == EdgeType.STRUCTURAL])}")
-    print(f"transition_markers: {[n.id for n in transition_markers]}")
-    print(f"output_map keys: {sorted(k.id for k in output_map)}")
 
     for edge in transition.edges:
         if edge.edge_type != EdgeType.STRUCTURAL:
             continue
-        print(f"  t:{edge.source.id}→t:{edge.target.id}  src_in_map={edge.source in output_map}  tgt_in_map={edge.target in output_map}  marker_skip={edge.source in transition_markers or edge.target in transition_markers}")
         if edge.source in transition_markers or edge.target in transition_markers:
             continue
+        if edge.source in transition_placeholders or edge.target in transition_placeholders:
+            continue  # placeholder edges are matching artifacts, not real output
         source = output_map.get(edge.source)
         target = output_map.get(edge.target)
         if source is None or target is None:
@@ -311,6 +357,7 @@ def _apply_pass(
         candidate = Edge(source=source, target=target, edge_type=EdgeType.STRUCTURAL)
         if candidate not in graph:
             graph.add_edge(source, target, EdgeType.STRUCTURAL)
+
     return output_map
 
 

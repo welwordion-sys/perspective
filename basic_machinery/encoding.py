@@ -181,6 +181,25 @@ def build_parameter(graph: PerspectiveGraph) -> tuple[Node, Node]:
     return node, node
 
 
+def build_placeholder(graph: PerspectiveGraph) -> Node:
+    """
+    External boundary placeholder node.
+    Encodes 'this node has a connection outside the matched subgraph.'
+    Signature: structural self-loop + operational self-loop.
+    Distinct from all other node types in the system:
+      - bit 0: no edges
+      - bit 1: structural self-loop only
+      - tombstone: operational self-loop only
+      - placeholder: both self-loops
+    Used in transition input subgraphs to mark boundary nodes that have
+    external connections in the real graph. Invisible to graph rewriting —
+    only used during step 3 matching in _apply_pass.
+    """
+    node = graph.add_node()
+    graph.add_edge(node, node, EdgeType.STRUCTURAL)
+    graph.add_edge(node, node, EdgeType.OPERATIONAL)
+    return node
+
 # ---------------------------------------------------------------------------
 # Expression assembly
 # ---------------------------------------------------------------------------
