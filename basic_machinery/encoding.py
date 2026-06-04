@@ -409,8 +409,7 @@ def _make_neutral_collapse_rule(
     return OperationDefinition(
         name=name,
         pattern=p,
-        graph2s=g2s,
-        graph2o=g2o,
+        graph2=g2s,
     )
 
 
@@ -448,8 +447,7 @@ def _make_zero_product_rule() -> OperationDefinition:
     return OperationDefinition(
         name='mul_zero_collapse',
         pattern=p,
-        graph2s=g2s,
-        graph2o=g2o,
+        graph2=g2s,
     )
 
 
