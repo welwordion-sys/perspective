@@ -87,6 +87,46 @@ def _add_op_marker_chain(g: PerspectiveGraph, src: Node, tgt: Node) -> None:
     g.add_edge(m, m, EdgeType.OPERATIONAL)
 
 
+def _add_output_carry(
+    g: PerspectiveGraph,
+    result_node: Node,
+    map_source: Node,
+) -> tuple[Node, Node]:
+    """
+    Atomically build an output carry 2-cycle AND its incoming OPERATIONAL
+    mapping edges, so the carry nodes classify as output (output_only) rather
+    than input under step-2 (output_only = has_incoming - has_outgoing).
+
+    Builds, as a single unit:
+      - carry_a, carry_b nodes
+      - structural 2-cycle  carry_a <-> carry_b
+      - result_node -> carry_a  (output OPERATIONAL edge, encoded as a marker chain)
+      - map_source -> carry_a, map_source -> carry_b  (incoming MAPPING edges)
+
+    The mapping edges are the fix: without them step-2 puts carry_a/carry_b in
+    input_nodes, inflating the step-3 input subgraph and tripping the exact-match
+    size guard for every carry rule.
+
+    map_source is the conservative correspondent (per the conservative_mapping
+    decision): the input node on the result line (in_result, or in_tail for
+    add_init). A born carry-out has no input-carry correspondent, so the
+    result-line input is the most defensible source. Identity/id preservation is
+    an incremental-recompute optimisation, not a correctness property — the
+    output graph is a fresh layer delta — so the exact real node each carry node
+    receives does not matter, only that they classify and construct as output.
+    """
+    carry_a = g.add_node()
+    carry_b = g.add_node()
+    g.add_edge(carry_a, carry_b, EdgeType.STRUCTURAL)
+    g.add_edge(carry_b, carry_a, EdgeType.STRUCTURAL)
+    g.add_edge(result_node, carry_a, EdgeType.STRUCTURAL)
+    _add_op_marker_chain(g, result_node, carry_a)
+    # The mapping edges — the actual fix.
+    g.add_edge(map_source, carry_a, EdgeType.OPERATIONAL)
+    g.add_edge(map_source, carry_b, EdgeType.OPERATIONAL)
+    return carry_a, carry_b
+
+
 def _add_finished_tag_output(g: PerspectiveGraph, op: Node, tag: OpTag) -> None:
     size = len(tag.cycle_nodes)
     for i in range(size):
@@ -241,12 +281,9 @@ def _make_add_init_rule(left_bit: int, right_bit: int,
             g2.add_edge(out_right_pos, ph, EdgeType.STRUCTURAL)
 
     if carry_out:
-        out_carry_a = g2.add_node()
-        out_carry_b = g2.add_node()
-        g2.add_edge(out_result, out_carry_a, EdgeType.STRUCTURAL)
-        g2.add_edge(out_carry_a, out_carry_b, EdgeType.STRUCTURAL)
-        g2.add_edge(out_carry_b, out_carry_a, EdgeType.STRUCTURAL)
-        _add_op_marker_chain(g2, out_result, out_carry_a)
+        # Born carry-out: no input carry correspondent. Source the mapping edges
+        # from in_tail (the result-line input), the most defensible correspondent.
+        _add_output_carry(g2, out_result, in_tail)
 
     return OperationDefinition(name=name, pattern=p, graph2=g2)
 
@@ -316,19 +353,16 @@ def _make_bit_add_rule(left_bit: int, right_bit: int, carry_in: int) -> Operatio
     g2.add_edge(out_op, out_result,       EdgeType.STRUCTURAL)
     if result_bit == 1:
         g2.add_edge(out_result, out_result, EdgeType.STRUCTURAL)
+    # Born carry-out (no input carry correspondent): source mapping edges from
+    # in_result, the result-line correspondent. Builds the 2-cycle, the output
+    # marker chain, and the incoming mapping edges atomically.
     if carry_out:
-        out_new_carry_a = g2.add_node()
-        out_new_carry_b = g2.add_node()
-        g2.add_edge(out_result, out_new_carry_a, EdgeType.STRUCTURAL)
-        g2.add_edge(out_new_carry_a, out_new_carry_b, EdgeType.STRUCTURAL)
-        g2.add_edge(out_new_carry_b, out_new_carry_a, EdgeType.STRUCTURAL)
+        _add_output_carry(g2, out_result, in_result)
 
     # OPERATIONAL output as marker chains
     _add_op_marker_chain(g2, out_op, out_left_parent)
     _add_op_marker_chain(g2, out_op, out_right_parent)
     _add_op_marker_chain(g2, out_op, out_result)
-    if carry_out:
-        _add_op_marker_chain(g2, out_result, out_new_carry_a)
 
     return OperationDefinition(name=name, pattern=p, graph2=g2)
 
@@ -412,18 +446,13 @@ def _make_drain_rule(active_side: str, active_bit: int, exhausted_bit: int, carr
     g2.add_edge(out_op, out_result,        EdgeType.STRUCTURAL)
     if result_bit == 1:
         g2.add_edge(out_result, out_result, EdgeType.STRUCTURAL)
+    # Born carry-out: source mapping edges from in_result (result-line correspondent).
     if carry_out:
-        out_new_carry_a = g2.add_node()
-        out_new_carry_b = g2.add_node()
-        g2.add_edge(out_result,       out_new_carry_a, EdgeType.STRUCTURAL)
-        g2.add_edge(out_new_carry_a,  out_new_carry_b, EdgeType.STRUCTURAL)
-        g2.add_edge(out_new_carry_b,  out_new_carry_a, EdgeType.STRUCTURAL)
+        _add_output_carry(g2, out_result, in_result)
 
     # OPERATIONAL output: op->active_parent (advances pointer), op->result
     _add_op_marker_chain(g2, out_op, out_active_parent)
     _add_op_marker_chain(g2, out_op, out_result)
-    if carry_out:
-        _add_op_marker_chain(g2, out_result, out_new_carry_a)
 
     return OperationDefinition(name=name, pattern=p, graph2=g2)
 
@@ -471,6 +500,12 @@ def _make_add_finalise_rule(left_msb: int, right_msb: int, carry_in: int) -> Ope
         g2.add_edge(out_msb, out_msb, EdgeType.STRUCTURAL)
         g2.add_edge(out_op,  out_msb,    EdgeType.STRUCTURAL)
         g2.add_edge(out_msb, out_result, EdgeType.STRUCTURAL)
+        # Incoming MAPPING edge: without it, out_msb (born overflow bit) has no
+        # incoming operational edge and step-2 misclassifies it as an input node.
+        # Sourced from in_result (the result-line correspondent). This is a
+        # mapping instruction, not an output operational edge, so it does not
+        # violate finalise's "no operational output" design.
+        g2.add_edge(in_result, out_msb, EdgeType.OPERATIONAL)
     else:
         g2.add_edge(out_op, out_result, EdgeType.STRUCTURAL)
 
