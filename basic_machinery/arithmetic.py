@@ -146,147 +146,138 @@ def _add_unfinished_tag_output(g: PerspectiveGraph, op: Node, tag: OpTag) -> Non
 
 
 # ---------------------------------------------------------------------------
-# add_init rules (4 rules)
+# add_init rules — successor-free, port-threading (rebuilt 2026-06-10)
+#
+# Window = {operator 3-cycle, left LSB, right LSB}. No successor node is modelled;
+# multi-bit-ness is expressed by the LSB's (STRUCTURAL,out) crossing to the shared
+# placeholder (the onward chain hop). LSB-terminal axis = whether that crossing is
+# present: multi -> present, single -> absent.
+#
+# Mapping (verified by trace on 3+4, 3+5, 1+2):
+#   in_cyc[i] -> out_cyc[i]   (handle == cyc[last], mapped exactly ONCE)
+#   in_anchor -> out_anchor
+#   in_tail   -> out_result, out_buffer        (tail repurposed as buffer)
+#   in_left   -> out_cyc[0] / in_right -> out_cyc[1]   (PORT threads the successor
+#               pathway forward; omitted for a single-bit side with no successor)
+#
+# Result construction (add_init_result_construction): result hangs off the BUFFER,
+# never the operator. result MSB -S-> buffer ; result LSB -OP-> buffer (marker
+# chain) ; handle -S-> buffer (tail attachment survives). MSB==LSB at init so both
+# originate from the one result node. Carry: born 2-cycle off result, mapping
+# edges sourced from in_tail.
 # ---------------------------------------------------------------------------
-# add_init rules (8 rules)
-#
-# Fires on an unfinished op pointing to LSBs of both operands.
-# left_single / right_single: True if that operand is a single-bit number
-#   (no structural parent above its LSB node).
-#
-# All variants:
-#   - Convert op tag from unfinished to finished
-#   - Compute LSB result bit (and carry if sum >= 2)
-#   - Create result node (from tail) + buffer node (MSB placeholder)
-#   - result_lsb ->S-> buffer  (structural chain will grow toward buffer)
-#   - result_lsb ->OP-> buffer (fixed anchor: LSB always knows where MSB is)
-#   - op ->OP-> result_lsb     (op holds result LSB pointer)
-#
-# For multi-bit operands: op advances pointer to parent (parent is boundary).
-# For single-bit operands: operand pointer consumed (deleted), no parent to advance to.
-# ---------------------------------------------------------------------------
+
+def _typed_input_graph(p: PerspectiveGraph, specs: dict):
+    """Clone p into an input-side graph; attach boundary nodes in `specs` to one
+    shared placeholder using the typed crossing encoding
+    (operational_crossing_needs_marker_chain):
+        (S,out): B->ph ; (S,in): ph->B ;
+        (O,out): chain B->m->ph ; (O,in): chain ph->m->B.
+    Pattern OPERATIONAL A->B become marker chains; op self-loops -> struct self-loops.
+    Returns (g, node_map, placeholder)."""
+    g = PerspectiveGraph()
+    nm: dict[Node, Node] = {}
+    for node in p.nodes:
+        nm[node] = g.add_node()
+    for e in p.edges:
+        s, t = nm[e.source], nm[e.target]
+        if e.edge_type == EdgeType.STRUCTURAL:
+            g.add_edge(s, t, EdgeType.STRUCTURAL)
+        elif e.source == e.target:
+            g.add_edge(s, t, EdgeType.STRUCTURAL)
+        else:
+            _add_op_marker_chain(g, s, t)
+    ph = None
+    if specs:
+        ph = g.add_node()
+        g.add_edge(ph, ph, EdgeType.STRUCTURAL)
+        g.add_edge(ph, ph, EdgeType.OPERATIONAL)
+        for bn, (etype, direction) in specs.items():
+            B = nm[bn]
+            if etype == EdgeType.STRUCTURAL and direction == 'out':
+                g.add_edge(B, ph, EdgeType.STRUCTURAL)
+            elif etype == EdgeType.STRUCTURAL and direction == 'in':
+                g.add_edge(ph, B, EdgeType.STRUCTURAL)
+            elif etype == EdgeType.OPERATIONAL and direction == 'out':
+                _add_op_marker_chain(g, B, ph)
+            elif etype == EdgeType.OPERATIONAL and direction == 'in':
+                _add_op_marker_chain(g, ph, B)
+            else:
+                raise ValueError(f"bad spec for {bn}: {(etype, direction)}")
+    return g, nm, ph
+
 
 def _make_add_init_rule(left_bit: int, right_bit: int,
                         left_single: bool = False, right_single: bool = False) -> OperationDefinition:
     result_bit = (left_bit + right_bit) % 2
     carry_out  = (left_bit + right_bit) >= 2
-    ls = 's' if left_single  else 'm'  # s=single, m=multi
+    ls = 's' if left_single else 'm'
     rs = 's' if right_single else 'm'
     name = f'add_init_{left_bit}{right_bit}_{ls}{rs}'
 
-    # --- Pattern ---
+    from basic_machinery.encoding import build_operator
     p = PerspectiveGraph()
-    op_node, op_tag = _add_op_node(p)
-    left_pos  = _add_bit_one(p) if left_bit  else _add_bit_zero(p)
-    right_pos = _add_bit_one(p) if right_bit else _add_bit_zero(p)
-    p.add_edge(op_node, left_pos,  EdgeType.OPERATIONAL)
-    p.add_edge(op_node, right_pos, EdgeType.OPERATIONAL)
-    # For multi-bit operands, add a parent node (marks that a parent exists above)
-    if not left_single:
-        left_parent = _add_parent(p, left_pos)
-    if not right_single:
-        right_parent = _add_parent(p, right_pos)
+    handle, tag = build_operator(p, '+', finished=False)
+    cyc = tag.cycle_nodes
 
-    # --- Boundary nodes ---
-    # op is always boundary (has parent equality node above).
-    # multi-bit parents are boundary (have sibling subtrees outside match).
-    boundary = {op_node}
-    if not left_single:
-        boundary.add(left_parent)
-    if not right_single:
-        boundary.add(right_parent)
+    def _bit(v):
+        n = p.add_node()
+        if v == 1:
+            p.add_edge(n, n, EdgeType.STRUCTURAL)
+        return n
+    ll = _bit(left_bit); rl = _bit(right_bit)
+    p.add_edge(cyc[0], ll, EdgeType.OPERATIONAL)
+    p.add_edge(cyc[1], rl, EdgeType.OPERATIONAL)
 
-    # --- graph2 (unified transition) ---
-    g2, p2g = _make_input_graph(p, boundary_nodes=boundary)
-    in_op     = p2g[op_node]
-    in_cycles = [p2g[c] for c in op_tag.cycle_nodes]
-    in_anchor = p2g[op_tag.anchor]
-    in_tail   = p2g[op_tag.tail]
-    in_left   = p2g[left_pos]
-    in_right  = p2g[right_pos]
-    if not left_single:
-        in_left_parent  = p2g[left_parent]
-    if not right_single:
-        in_right_parent = p2g[right_parent]
+    specs = {handle: (EdgeType.OPERATIONAL, 'in')}
+    if not left_single:  specs[ll] = (EdgeType.STRUCTURAL, 'out')
+    if not right_single: specs[rl] = (EdgeType.STRUCTURAL, 'out')
+    g2, nm, ph = _typed_input_graph(p, specs)
 
-    # Output nodes
-    out_op     = g2.add_node()
-    out_cycles = [g2.add_node() for _ in op_tag.cycle_nodes]
+    in_handle = nm[handle]
+    in_cyc    = [nm[c] for c in cyc]
+    in_anchor = nm[tag.anchor]
+    in_tail   = nm[tag.tail]
+    in_left   = nm[ll]; in_right = nm[rl]
+
+    sz = len(cyc)
+    out_cyc = [g2.add_node() for _ in range(sz - 1)]
+    out_handle = g2.add_node(); out_cyc.append(out_handle)   # out_cyc[last] == handle
     out_anchor = g2.add_node()
-    out_result = g2.add_node()   # result LSB (from tail)
-    out_buffer = g2.add_node()   # MSB placeholder buffer
-    if not left_single:
-        out_left_parent  = g2.add_node()
-    else:
-        out_left_zero = g2.add_node()   # implicit zero above single-bit left operand
-    if not right_single:
-        out_right_parent = g2.add_node()
-    else:
-        out_right_zero = g2.add_node()  # implicit zero above single-bit right operand
+    out_result = g2.add_node()
+    out_buffer = g2.add_node()
 
-    # OPERATIONAL input->output mapping
-    g2.add_edge(in_op,     out_op,     EdgeType.OPERATIONAL)
-    for ic, oc in zip(in_cycles, out_cycles):
+    # mapping
+    for ic, oc in zip(in_cyc, out_cyc):
         g2.add_edge(ic, oc, EdgeType.OPERATIONAL)
     g2.add_edge(in_anchor, out_anchor, EdgeType.OPERATIONAL)
-    # in_tail -> out_result (reuse), out_buffer (new)
     g2.add_edge(in_tail,   out_result, EdgeType.OPERATIONAL)
     g2.add_edge(in_tail,   out_buffer, EdgeType.OPERATIONAL)
-    # Multi-bit: parent survives (left_pos deleted, consumed)
-    # Single-bit: bit node maps to a fresh zero (implicit zero above MSB)
-    if not left_single:
-        g2.add_edge(in_left_parent, out_left_parent, EdgeType.OPERATIONAL)
-    else:
-        g2.add_edge(in_left,        out_left_zero,   EdgeType.OPERATIONAL)
-    if not right_single:
-        g2.add_edge(in_right_parent, out_right_parent, EdgeType.OPERATIONAL)
-    else:
-        g2.add_edge(in_right,        out_right_zero,   EdgeType.OPERATIONAL)
+    if not left_single:  g2.add_edge(in_left,  out_cyc[0], EdgeType.OPERATIONAL)
+    if not right_single: g2.add_edge(in_right, out_cyc[1], EdgeType.OPERATIONAL)
 
-    # STRUCTURAL output: finished op tag topology
-    out_tag = OpTag(cycle_nodes=out_cycles, anchor=out_anchor, tail=None)
-    _add_finished_tag_output(g2, out_op, out_tag)
-    # Op structural edges to current operand positions and result
-    out_left_pos  = out_left_parent  if not left_single  else out_left_zero
-    out_right_pos = out_right_parent if not right_single else out_right_zero
-    g2.add_edge(out_op, out_left_pos,  EdgeType.STRUCTURAL)
-    g2.add_edge(out_op, out_right_pos, EdgeType.STRUCTURAL)
-    g2.add_edge(out_op, out_result,    EdgeType.STRUCTURAL)
-    # Result bit value
+    # operator 3-ring + anchor off cyc0 + tail attachment handle->buffer
+    for i in range(sz):
+        g2.add_edge(out_cyc[i], out_cyc[(i + 1) % sz], EdgeType.STRUCTURAL)
+    g2.add_edge(out_cyc[0], out_anchor, EdgeType.STRUCTURAL)
+    g2.add_edge(out_handle, out_buffer, EdgeType.STRUCTURAL)
+
+    # result off buffer
     if result_bit == 1:
         g2.add_edge(out_result, out_result, EdgeType.STRUCTURAL)
-    # Result LSB -> buffer (structural chain start + operational anchor)
     g2.add_edge(out_result, out_buffer, EdgeType.STRUCTURAL)
     _add_op_marker_chain(g2, out_result, out_buffer)
 
-    # OPERATIONAL output: op->left_pos, op->right_pos, op->result
-    _add_op_marker_chain(g2, out_op, out_left_pos)
-    _add_op_marker_chain(g2, out_op, out_right_pos)
-    _add_op_marker_chain(g2, out_op, out_result)
-
-    # Mark boundary output nodes with placeholder connection so step 4c
-    # preserves their external edges.
-    # op and multi-bit parent nodes have external connections.
-    # The placeholder node in the transition (already exists from input side).
-    placeholder_nodes = [n for n in g2.nodes
-                         if (EdgeType.STRUCTURAL in [e.edge_type for e in g2.edges_from(n)] or True)
-                         and any(e.source==n and e.target==n and e.edge_type==EdgeType.STRUCTURAL for e in g2.edges)
-                         and any(e.source==n and e.target==n and e.edge_type==EdgeType.OPERATIONAL for e in g2.edges)]
-    if placeholder_nodes:
-        ph = placeholder_nodes[0]
-        g2.add_edge(out_op, ph, EdgeType.STRUCTURAL)
-        if not left_single:
-            g2.add_edge(out_left_pos, ph, EdgeType.STRUCTURAL)
-        if not right_single:
-            g2.add_edge(out_right_pos, ph, EdgeType.STRUCTURAL)
-
     if carry_out:
-        # Born carry-out: no input carry correspondent. Source the mapping edges
-        # from in_tail (the result-line input), the most defensible correspondent.
-        _add_output_carry(g2, out_result, in_tail)
+        ca = g2.add_node(); cb = g2.add_node()
+        g2.add_edge(ca, cb, EdgeType.STRUCTURAL)
+        g2.add_edge(cb, ca, EdgeType.STRUCTURAL)
+        g2.add_edge(out_result, ca, EdgeType.STRUCTURAL)
+        _add_op_marker_chain(g2, out_result, ca)
+        g2.add_edge(in_tail, ca, EdgeType.OPERATIONAL)
+        g2.add_edge(in_tail, cb, EdgeType.OPERATIONAL)
 
     return OperationDefinition(name=name, pattern=p, graph2=g2)
-
 
 # ---------------------------------------------------------------------------
 # bit_add rules (8 rules)

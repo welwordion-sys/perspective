@@ -45,34 +45,45 @@ def _tag_parameter(graph: PerspectiveGraph, node: Node) -> None:
     graph.add_edge(companion, node, EdgeType.STRUCTURAL)
 
 
-def _tag_cycle(graph: PerspectiveGraph, node: Node, size: int) -> OpTag:
+def _tag_cycle(graph: PerspectiveGraph, size: int) -> OpTag:
     """
-    Finished operator/equality tag.
-    Directed cycle of `size` nodes attached to node. No tail.
-    cycle[0] gets a left anchor node — dead-end structural edge that
-    marks operand asymmetry and provides a consistent GA grammar entry point.
+    Finished operator/equality tag. The operator IS this anchored cycle —
+    there is no separate op node (eliminated per operator_port_topology).
 
-    node -> cycle[0] -> cycle[1] -> ... -> cycle[size-1] -> cycle[0]
+    Directed structural cycle of `size` nodes. No tail.
+    cycle[0] is the operator handle AND the left-operand port; it carries a
+    dead-end structural edge to an anchor node. Distance-from-anchor is what
+    orders the operand ports: cycle[0] (anchored) = left, cycle[1] = right.
+
+    Ports (wired later by connect_operands / parent attachment):
+      left  -> cycle[0]   (anchored)
+      right -> cycle[1]
+      parent-in -> cycle[last]
+      result -> off the tail (finished tag has no tail; see _tag_cycle_plus)
+
+    cycle[0] -> cycle[1] -> ... -> cycle[size-1] -> cycle[0]
     cycle[0] -> anchor
     """
     cycle_nodes = [graph.add_node() for _ in range(size)]
     for i in range(size):
         graph.add_edge(cycle_nodes[i], cycle_nodes[(i + 1) % size], EdgeType.STRUCTURAL)
-    graph.add_edge(node, cycle_nodes[0], EdgeType.STRUCTURAL)
     anchor = graph.add_node()
     graph.add_edge(cycle_nodes[0], anchor, EdgeType.STRUCTURAL)
     return OpTag(cycle_nodes=cycle_nodes, anchor=anchor, tail=None)
 
 
-def _tag_cycle_plus(graph: PerspectiveGraph, node: Node, size: int) -> OpTag:
+def _tag_cycle_plus(graph: PerspectiveGraph, size: int) -> OpTag:
     """
-    Unfinished operator/equality tag.
-    Same as _tag_cycle but cycle[size-1] also has a tail node.
-    Tail presence = unfinished state. Tail = result attachment point.
-    Anchor off cycle[0] = left marker.
+    Unfinished operator/equality tag. The operator IS this anchored cycle —
+    no separate op node (operator_port_topology).
 
-    node -> cycle[0] -> ... -> cycle[size-1] -> cycle[0]
-                               cycle[size-1] -> tail
+    Same as _tag_cycle but cycle[size-1] also has a tail node.
+    Tail presence = unfinished state. Tail = result buffer attachment point
+    (add_init repurposes it as the result buffer; see add_init_result_construction).
+    Anchor off cycle[0] = left marker / handle.
+
+    cycle[0] -> ... -> cycle[size-1] -> cycle[0]
+                       cycle[size-1] -> tail
     cycle[0] -> anchor
     """
     cycle_nodes = [graph.add_node() for _ in range(size)]
@@ -81,7 +92,6 @@ def _tag_cycle_plus(graph: PerspectiveGraph, node: Node, size: int) -> OpTag:
         graph.add_edge(cycle_nodes[i], cycle_nodes[i + 1], EdgeType.STRUCTURAL)
     graph.add_edge(cycle_nodes[-1], cycle_nodes[0], EdgeType.STRUCTURAL)
     graph.add_edge(cycle_nodes[-1], tail, EdgeType.STRUCTURAL)
-    graph.add_edge(node, cycle_nodes[0], EdgeType.STRUCTURAL)
     anchor = graph.add_node()
     graph.add_edge(cycle_nodes[0], anchor, EdgeType.STRUCTURAL)
     return OpTag(cycle_nodes=cycle_nodes, anchor=anchor, tail=tail)
@@ -106,30 +116,33 @@ _EQUALITY_SIZE = 7
 
 def build_operator(graph: PerspectiveGraph, op: str, finished: bool = False) -> tuple[Node, OpTag]:
     """
-    Build an operator node with its tag structure.
-    Returns (op_node, tag) where tag exposes all internal node handles
-    for use in transition graph construction.
-    finished=False: unfinished tag (tail present, result attachment point available).
-    finished=True: finished tag (no tail, no rules fire).
+    Build an operator as an anchored directed cycle (operator_port_topology).
+    Returns (handle, tag) where handle IS tag.cycle_nodes[-1] (cycle[last]) — the
+    node a PARENT attaches its operand pointer to (parent-in crossing). The
+    operand ports are separate: left -> cycle[0] (anchored), right -> cycle[1].
+    There is no separate op node.
+
+    finished=False: unfinished tag (tail present, result buffer point available).
+    finished=True: finished tag (no tail, stuck/halted form).
     """
     if op not in _OPERATOR_TAGS:
         raise ValueError(f"Unknown operator '{op}'. Expected one of {list(_OPERATOR_TAGS)}")
-    node = graph.add_node()
     size = _OPERATOR_TAGS[op]
-    tag_fn = _tag_cycle if finished else _tag_cycle_plus  # swapped: finished=True -> no tail
-    tag = tag_fn(graph, node, size)
-    return node, tag
+    tag_fn = _tag_cycle if finished else _tag_cycle_plus
+    tag = tag_fn(graph, size)
+    return tag.cycle_nodes[-1], tag
 
 
 def build_equality(graph: PerspectiveGraph, finished: bool = False) -> tuple[Node, OpTag]:
     """
-    Build an equality node with its tag structure.
-    Returns (eq_node, tag).
+    Build an equality node as an anchored directed cycle (size 7).
+    Returns (handle, tag) where handle IS tag.cycle_nodes[-1] (cycle[last]).
+    The = is the top node (testcases_always_equation), so nothing points into
+    its cycle[last]; the handle is still the canonical root reference.
     """
-    node = graph.add_node()
-    tag_fn = _tag_cycle if finished else _tag_cycle_plus  # swapped
-    tag = tag_fn(graph, node, _EQUALITY_SIZE)
-    return node, tag
+    tag_fn = _tag_cycle if finished else _tag_cycle_plus
+    tag = tag_fn(graph, _EQUALITY_SIZE)
+    return tag.cycle_nodes[-1], tag
 
 
 # ---------------------------------------------------------------------------
@@ -138,30 +151,38 @@ def build_equality(graph: PerspectiveGraph, finished: bool = False) -> tuple[Nod
 
 def build_number(graph: PerspectiveGraph, value: int) -> tuple[Node, Node]:
     """
-    Encode a non-negative integer as an open-length binary tree.
-    Bit order: MSB at root, LSB at deepest right leaf.
-    Leaf nodes: empty node = 0, self-loop node = 1.
-    Internal nodes: two structural children (left = higher bits, right = current bit).
-    Returns (root, lsb) — both known at construction time, no traversal needed.
+    Encode a non-negative integer as an open-length BIT CHAIN.
+
+    Structure (operand_is_bit_chain): one node per bit, linked LSB -> MSB by
+    structural edges:  lsb -S-> b1 -S-> ... -S-> msb.
+    Bit value: structural self-loop = 1, bare node = 0 (unchanged convention).
+    The operator attaches its operational pointer at the LSB; advancing one bit
+    toward the MSB is a single structural hop along the chain.
+
+    Returns (root, lsb) where root == lsb: the LSB is both the operator/nesting
+    attachment handle and the head of the chain. The MSB is the chain's far end
+    (reached by walking structural edges); result chains attach at the MSB for
+    matching, operands at the LSB.
+
+    Replaces the former binary-tree encoding (spine of internal nodes with bit
+    leaves on the side), which carried the same bit order but forced a
+    spine<->leaf hop per bit and gave operands a different shape from results.
+    No capability was lost in the switch (no sub-range-as-node addressing is
+    used anywhere); the chain makes operand and result the same shape and makes
+    the LSB->MSB walk one structural edge per bit.
     """
     if value < 0:
         raise ValueError("build_number does not handle negative integers.")
-    bits = bin(value)[2:]
-    return _build_bit_tree(graph, bits)
-
-
-def _build_bit_tree(graph: PerspectiveGraph, bits: str) -> tuple[Node, Node]:
-    node = graph.add_node()
-    if len(bits) == 1:
-        if bits == '1':
-            _tag_one(graph, node)
-        return node, node  # root and lsb are the same for a single bit
-    else:
-        left_root, _ = _build_bit_tree(graph, bits[:-1])
-        right_root, lsb = _build_bit_tree(graph, bits[-1])  # lsb bubbles up from right
-        graph.add_edge(node, left_root, EdgeType.STRUCTURAL)
-        graph.add_edge(node, right_root, EdgeType.STRUCTURAL)
-        return node, lsb
+    bits = bin(value)[2:]                  # MSB first
+    lsb_to_msb = bits[::-1]                 # index 0 = LSB
+    nodes = [graph.add_node() for _ in lsb_to_msb]
+    for i, b in enumerate(lsb_to_msb):
+        if b == '1':
+            graph.add_edge(nodes[i], nodes[i], EdgeType.STRUCTURAL)  # bit value 1
+        if i + 1 < len(nodes):
+            graph.add_edge(nodes[i], nodes[i + 1], EdgeType.STRUCTURAL)  # LSB -> MSB chain
+    lsb = nodes[0]
+    return lsb, lsb  # root == lsb: LSB is the attachment handle (head of chain)
 
 
 # ---------------------------------------------------------------------------
@@ -206,50 +227,58 @@ def build_placeholder(graph: PerspectiveGraph) -> Node:
 
 def connect_operands(
     graph: PerspectiveGraph,
-    op_node: Node,
+    tag: OpTag,
     left_root: Node,
     left_lsb: Node,
     right_root: Node,
     right_lsb: Node,
 ) -> None:
     """
-    Connect an operator node to the LSBs of its two operand subtrees
-    via operational edges. Position edges start at LSB and walk toward MSB
-    during reduction. Left operand first, right operand second.
+    Connect an operator (anchored cycle) to the LSBs of its two operand
+    subtrees via operational edges, using DISTINCT ports so left/right are
+    positionally discriminable (operator_port_topology, operand_order_gap):
+      left  operand LSB <- cycle[0]  (anchored port)
+      right operand LSB <- cycle[1]
+    Position edges start at LSB and walk toward MSB during reduction.
     """
-    graph.add_edge(op_node, left_lsb, EdgeType.OPERATIONAL)
-    graph.add_edge(op_node, right_lsb, EdgeType.OPERATIONAL)
+    graph.add_edge(tag.cycle_nodes[0], left_lsb,  EdgeType.OPERATIONAL)
+    graph.add_edge(tag.cycle_nodes[1], right_lsb, EdgeType.OPERATIONAL)
 
 
 def connect_equality(
     graph: PerspectiveGraph,
-    eq_node: Node,
+    tag: OpTag,
     left_root: Node,
-    right_root: Node
+    right_root: Node,
 ) -> None:
     """
-    Connect an equality node to the roots of its left and right
-    expression subtrees via operational edges.
+    Connect an equality (anchored cycle, size 7) to the roots of its left and
+    right expression subtrees via operational edges, distinct ports:
+      left  root <- cycle[0]  (anchored)
+      right root <- cycle[1]
     """
-    graph.add_edge(eq_node, left_root, EdgeType.OPERATIONAL)
-    graph.add_edge(eq_node, right_root, EdgeType.OPERATIONAL)
+    graph.add_edge(tag.cycle_nodes[0], left_root,  EdgeType.OPERATIONAL)
+    graph.add_edge(tag.cycle_nodes[1], right_root, EdgeType.OPERATIONAL)
 
 
-def get_operands(graph: PerspectiveGraph, op_node: Node) -> tuple[Node, Node]:
+def get_operands(graph: PerspectiveGraph, tag: OpTag) -> tuple[Node, Node]:
     """
-    Return the (left, right) operand roots of an operator or equality node.
-    Order matches the order operational edges were added.
-    Raises if the node does not have exactly two operational edges.
-
-    NOTE: order-dependent on insertion order from a set — fragile under
-    concurrent rule application. Revisit if multiple rules fire simultaneously.
+    Return the (left, right) operand targets of an operator/equality.
+    Left is the operational target off cycle[0] (anchored port), right off
+    cycle[1]. Positional — no longer dependent on set insertion order, which
+    was the operand-order discrimination defect (operand_order_gap_root_cause).
+    Raises if either port does not carry exactly one operational edge.
     """
-    edges = graph.edges_from(op_node, EdgeType.OPERATIONAL)
-    if len(edges) != 2:
+    left_edges  = graph.edges_from(tag.cycle_nodes[0], EdgeType.OPERATIONAL)
+    right_edges = graph.edges_from(tag.cycle_nodes[1], EdgeType.OPERATIONAL)
+    left_edges  = [e for e in left_edges  if e.target != e.source]
+    right_edges = [e for e in right_edges if e.target != e.source]
+    if len(left_edges) != 1 or len(right_edges) != 1:
         raise ValueError(
-            f"Expected 2 operational edges from {op_node}, found {len(edges)}."
+            f"Expected one operational edge on each operand port; "
+            f"got left={len(left_edges)}, right={len(right_edges)}."
         )
-    return edges[0].target, edges[1].target
+    return left_edges[0].target, right_edges[0].target
 
 
 # ---------------------------------------------------------------------------
@@ -306,9 +335,9 @@ def _parse_equality(
     if pos < len(tokens) and tokens[pos] == '=':
         pos += 1
         right, pos = _parse_additive(graph, tokens, pos)
-        eq_node, _ = build_equality(graph, finished=False)
-        connect_equality(graph, eq_node, left[0], right[0])
-        return (eq_node, eq_node), pos
+        eq_handle, eq_tag = build_equality(graph, finished=False)
+        connect_equality(graph, eq_tag, left[0], right[0])
+        return (eq_handle, eq_handle), pos
     return left, pos
 
 
@@ -320,10 +349,12 @@ def _parse_additive(
         op = tokens[pos]
         pos += 1
         right, pos = _parse_multiplicative(graph, tokens, pos)
-        op_node, _ = build_operator(graph, op)
+        handle, tag = build_operator(graph, op)
         # left and right are (root, lsb) tuples from _parse_primary
-        connect_operands(graph, op_node, left[0], left[1], right[0], right[1])
-        left = op_node, op_node  # operator node is its own root and lsb placeholder
+        connect_operands(graph, tag, left[0], left[1], right[0], right[1])
+        # The operator's handle (cycle[0]) is its root; a parent attaches its
+        # operand pointer here. lsb placeholder = handle (operators have no bit tree).
+        left = handle, handle
     return left, pos
 
 
@@ -335,9 +366,9 @@ def _parse_multiplicative(
         op = tokens[pos]
         pos += 1
         right, pos = _parse_primary(graph, tokens, pos)
-        op_node, _ = build_operator(graph, op)
-        connect_operands(graph, op_node, left[0], left[1], right[0], right[1])
-        left = op_node, op_node
+        handle, tag = build_operator(graph, op)
+        connect_operands(graph, tag, left[0], left[1], right[0], right[1])
+        left = handle, handle
     return left, pos
 
 
@@ -388,12 +419,15 @@ def _make_neutral_collapse_rule(
     graph2o: empty — no new operational edges needed.
     """
     # --- Pattern ---
+    # Neutral element is the RIGHT operand (x - 0, x / 1, x + 0, x * 1).
+    # Survivor is the LEFT operand. The new port topology makes this
+    # distinction expressible; the old symmetric wiring could not, and would
+    # wrongly match e.g. 0 - x. survivor -> cycle[0], neutral -> cycle[1].
     p = PerspectiveGraph()
-    op_node, _ = build_operator(p, op, finished=False)
+    op_handle, op_tag = build_operator(p, op, finished=False)
     _, neutral_lsb = build_number(p, neutral_value)
     survivor_node = p.add_node()
-    p.add_edge(op_node, neutral_lsb, EdgeType.OPERATIONAL)
-    p.add_edge(op_node, survivor_node, EdgeType.OPERATIONAL)
+    connect_operands(p, op_tag, survivor_node, survivor_node, neutral_lsb, neutral_lsb)
 
     # --- graph2s ---
     # survivor_node is the only node that survives into the output.
@@ -426,12 +460,13 @@ def _make_zero_product_rule() -> OperationDefinition:
     identity (empty — no structural edges). graph2o is empty.
     """
     # --- Pattern ---
+    # x * 0: commutative, so operand order is harmless, but wire through ports
+    # for consistency. other -> cycle[0] (left), zero -> cycle[1] (right).
     p = PerspectiveGraph()
-    op_node, _ = build_operator(p, '*', finished=False)
+    op_handle, op_tag = build_operator(p, '*', finished=False)
     _, zero_lsb = build_number(p, 0)
     other_node = p.add_node()
-    p.add_edge(op_node, zero_lsb, EdgeType.OPERATIONAL)
-    p.add_edge(op_node, other_node, EdgeType.OPERATIONAL)
+    connect_operands(p, op_tag, other_node, other_node, zero_lsb, zero_lsb)
 
     # --- graph2s ---
     # New zero node: empty node, no structural edges.

@@ -197,32 +197,25 @@ def _apply_pass(
     """
     Apply one transformation pass using the unified transition graph.
 
-    node_map is the FIRING BINDING produced by the cut-at-edge match in apply()
-    (bind_target -> real_node, keyed by input-side transition nodes). It is the
-    single source of correspondence: the same binding that decided the rule fires
-    drives the rewrite. There is no separate step-3 re-match.
-
-    Why step 3 is gone: in the old two-pass scheme the matched input nodes were a
-    SUBGRAPH of the matching, so a reconciliation match (step 3) was needed to
-    re-establish correspondence between the input-node set and the real region.
-    With the derived match view, the bind targets ARE the matched set exactly, so
-    the firing binding already spans the rewrite. No reconciliation remains.
-
-    The transition graph stays the single representation: input->output mapping
-    and output structure are read LIVE from `transition` here (steps 4-5), never
-    cached, because `transition` is the medium the GA mutates.
+    The transition graph encodes:
+      - Input side: mirrors the matched subgraph after step 1's edge conversion.
+        STRUCTURAL edges unchanged. OPERATIONAL edges A->B become marker chains
+        (A->[S]->m->[S]->B, m->[OP]->m). Boundary nodes have a structural edge
+        to a shared placeholder (structural+operational self-loop).
+      - OPERATIONAL non-self-loop edges: input->output node mapping instructions.
+      - Output side STRUCTURAL edges: written directly as STRUCTURAL into real graph.
+      - Output side marker chains (A->[S]->m->[S]->B, m->[OP]->m): written as
+        OPERATIONAL edges into real graph.
 
     Steps:
       1. Insert marker nodes for OPERATIONAL edges in matched subgraph.
-      2. Classify transition nodes (markers, placeholders, input, output) — needed
-         by steps 4-5; read live from the transition graph.
-      4. Follow OPERATIONAL input->output edges to build output_map, seeded by the
-         firing binding.
+      2. Classify transition nodes (markers, placeholders, input, output).
+      3. Exact-match transition input subgraph against real graph.
+      4. Follow OPERATIONAL edges to build output_map.
       4b. Merge, delete, remove markers.
       5. Write output edges (STRUCTURAL direct, OPERATIONAL via marker chains).
     """
     matched_target_nodes = set(node_map.values())
-
 
     # ------------------------------------------------------------------
     # Step 1: Insert marker nodes for OPERATIONAL edges in matched subgraph.
@@ -287,12 +280,55 @@ def _apply_pass(
     transition_markers = transition_all_markers
 
     # ------------------------------------------------------------------
-    # Step 3 REMOVED. The firing binding (node_map) is the correspondence.
-    # We adopt it directly; real_candidates is the matched real region plus
-    # the markers step 1 just inserted (needed by step 4's reuse logic).
+    # Step 3: Match transition input subgraph against real graph.
     # ------------------------------------------------------------------
+    input_subgraph = transition.subgraph(input_nodes | transition_input_markers)
     real_candidates = matched_target_nodes | marker_nodes
-    input_match = MatchResult(success=True, node_map=dict(node_map))
+    real_candidates_list = list(real_candidates)
+
+    input_match = match(
+        input_subgraph,
+        graph.subgraph(real_candidates),
+        candidates=real_candidates_list,
+        exact=True,
+        real_candidates=real_candidates,
+    )
+
+    # Placeholder constraint: boundary nodes must have external connections.
+    if input_match.success:
+        for t_node, real_node in input_match.node_map.items():
+            has_placeholder_edge = any(
+                e.target in transition_placeholders
+                for e in transition.edges_from(t_node, EdgeType.STRUCTURAL)
+            )
+            if has_placeholder_edge:
+                has_external = (
+                    any(e.target not in real_candidates
+                        for e in graph.edges_from(real_node, EdgeType.STRUCTURAL))
+                    or any(e.source not in real_candidates
+                           for e in graph.edges_to(real_node, EdgeType.STRUCTURAL))
+                    or any(e.target not in real_candidates
+                           for e in graph.edges_from(real_node, EdgeType.OPERATIONAL)
+                           if e.target != real_node)
+                    or any(e.source not in real_candidates
+                           for e in graph.edges_to(real_node, EdgeType.OPERATIONAL)
+                           if e.source != real_node)
+                )
+                if not has_external:
+                    input_match = MatchResult(success=False)
+                    break
+
+    if not input_match.success:
+        # Revert marker nodes
+        for m in list(marker_nodes):
+            incoming = [e for e in graph.edges if e.target == m and e.source != m]
+            outgoing = [e for e in graph.edges if e.source == m and e.target != m]
+            for edge in list(graph.edges):
+                if edge.source == m or edge.target == m:
+                    graph.remove_edge(edge)
+            if incoming and outgoing:
+                graph.add_edge(incoming[0].source, outgoing[0].target, EdgeType.OPERATIONAL)
+            graph.remove_node(m)
 
     # ------------------------------------------------------------------
     # Step 4: Build output_map from OPERATIONAL input->output edges.
@@ -438,33 +474,45 @@ def _apply_pass(
         if src_real is not None and tgt_real is not None:
             desired_structural.add((src_real, tgt_real))
 
-    # Determine which output nodes have placeholder connections (preserve external)
-    output_placeholder_connected: set[Node] = set()
+    # Determine which output nodes have placeholder connections, DIRECTIONALLY
+    # (apply_pass_4c_directional_cleanup). The direction is read from the
+    # transition edge between the output node and a placeholder:
+    #   output_node -> placeholder   => may preserve OUTGOING external edges (preserve_out)
+    #   placeholder -> output_node   => may preserve INCOMING external edges (preserve_in)
+    # This mirrors Edit-1's typed/directional input boundary_specs on the output side.
+    preserve_out: set[Node] = set()
+    preserve_in: set[Node] = set()
     for t_out, real_node in output_map.items():
-        if any(
-            (e.source == t_out and e.target in transition_placeholders) or
-            (e.target == t_out and e.source in transition_placeholders)
-            for e in transition.edges
-        ):
-            output_placeholder_connected.add(real_node)
+        for e in transition.edges:
+            if e.source == t_out and e.target in transition_placeholders:
+                preserve_out.add(real_node)
+            elif e.target == t_out and e.source in transition_placeholders:
+                preserve_in.add(real_node)
 
-    # Strip stale structural edges from surviving nodes
+    # Strip stale structural edges from surviving nodes — BOTH directions.
+    # External-edge cleanup is now symmetric: a surviving node's outgoing and
+    # incoming external edges are equally governed, preserved only if the node
+    # carries the matching directional placeholder declaration. Internal edges
+    # (both endpoints surviving) are handled once, keyed off the source.
     surviving_real = set(output_map.values())
     for edge in list(graph.edges):
         if edge.edge_type != EdgeType.STRUCTURAL:
             continue
-        if edge.source not in surviving_real:
-            continue
-        # External edge?
-        is_external = edge.target not in surviving_real
-        if is_external:
-            if edge.source in output_placeholder_connected:
-                continue  # preserve external edge
-            else:
-                graph.remove_edge(edge)  # remove external edge (no placeholder)
-        else:
-            # Internal edge — remove if not in desired output
+        src_surv = edge.source in surviving_real
+        tgt_surv = edge.target in surviving_real
+        if not src_surv and not tgt_surv:
+            continue  # edge unrelated to the rewritten region
+        if src_surv and tgt_surv:
+            # Internal edge — remove if not in desired output (handle once).
             if (edge.source, edge.target) not in desired_structural:
+                graph.remove_edge(edge)
+        elif src_surv:
+            # Outgoing external edge from a surviving node.
+            if edge.source not in preserve_out:
+                graph.remove_edge(edge)
+        else:  # tgt_surv
+            # Incoming external edge into a surviving node.
+            if edge.target not in preserve_in:
                 graph.remove_edge(edge)
 
     # ------------------------------------------------------------------
@@ -515,21 +563,10 @@ def apply(
     graph: PerspectiveGraph,
     operation: OperationDefinition,
 ) -> bool:
-    # Firing decision: cut-at-edge match derived from the transition's input side
-    # (operation.graph2), not a separate operation.pattern — the single
-    # representation, so there is no second view to drift from under GA mutation.
-    # Matching is on real TOTAL degree per (type, direction): the placeholders in
-    # the input graph supply the expected crossing-edge component so a legitimate
-    # boundary node's full degree balances. Runs in clean real-graph space, before
-    # _apply_pass step 1 marker-encodes the matched region for the rewrite.
-    from basic_machinery.match_view import derive_match_view, match_cut_at_edge
-    view = derive_match_view(operation.graph2)
-    node_map = match_cut_at_edge(
-        operation.graph2, graph, list(graph.nodes), view=view
-    )
-    if node_map is None:
+    result = match(operation.pattern, graph)
+    if not result.success:
         return False
-    _apply_pass(graph, node_map, operation.graph2)
+    _apply_pass(graph, result.node_map, operation.graph2)
     return True
 
 
