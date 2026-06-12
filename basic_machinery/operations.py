@@ -462,8 +462,8 @@ def _apply_pass(
     preserve_in: set[Node] = set()
     for t_out, real_node in output_map.items():
         for e in transition.edges:
-            if e.edge_type != EdgeType.STRUCTURAL:
-                continue
+            if e.source == e.target:
+                continue  # placeholder signature self-loops are not connections
             if e.source == t_out and e.target in transition_placeholders:
                 preserve_out.add(real_node)
             if e.target == t_out and e.source in transition_placeholders:
