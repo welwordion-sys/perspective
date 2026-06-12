@@ -427,15 +427,16 @@ def _apply_pass(
     recycle_pool.clear()
 
     # ------------------------------------------------------------------
-    # Step 4c: Strip stale structural edges from surviving nodes.
-    # For each surviving node (in output_map.values()), remove structural
-    # edges that are NOT present in the output side of the transition.
-    # External edges (to nodes outside real_candidates) are also removed
-    # unless the output node has a placeholder connection in the transition.
+    # Step 4c: Strip stale structural edges from surviving nodes — DIRECTION-SYMMETRIC.
+    # (KB apply_pass_4c_directional_cleanup) The old 4c only iterated edges whose
+    # SOURCE survived, so it governed a surviving node's OUTGOING external edges but
+    # never its INCOMING ones (preserved by omission). That contradicts cut-at-edge
+    # matching (degree counted per (type,direction)) and blocks add_finalise, which
+    # must REDIRECT/strip the parent->operator INCOMING crossing when it consumes the
+    # operator. Now: examine external edges in BOTH directions, governed by directional
+    # placeholder records preserve_out / preserve_in.
     # ------------------------------------------------------------------
 
-    # Build set of (real_src, real_tgt) structural edges that should exist
-    # after the rewrite (from transition output side, excluding markers/placeholders).
     desired_structural: set[tuple] = set()
     for edge in transition.edges:
         if edge.edge_type != EdgeType.STRUCTURAL:
@@ -449,33 +450,46 @@ def _apply_pass(
         if src_real is not None and tgt_real is not None:
             desired_structural.add((src_real, tgt_real))
 
-    # Determine which output nodes have placeholder connections (preserve external)
-    output_placeholder_connected: set[Node] = set()
+    # Directional placeholder records. A surviving output node connected to a
+    # placeholder preserves its external edges — but only in the direction(s) the
+    # placeholder edge runs:
+    #   out_node -S-> placeholder   => preserve OUTGOING external edges (preserve_out)
+    #   placeholder -S-> out_node   => preserve INCOMING external edges (preserve_in)
+    # An undirected/legacy placeholder connection (either direction present) is
+    # interpreted per its actual edge direction, so existing rules that only emit
+    # out_node -> placeholder keep exactly their old (preserve_out) behaviour.
+    preserve_out: set[Node] = set()
+    preserve_in: set[Node] = set()
     for t_out, real_node in output_map.items():
-        if any(
-            (e.source == t_out and e.target in transition_placeholders) or
-            (e.target == t_out and e.source in transition_placeholders)
-            for e in transition.edges
-        ):
-            output_placeholder_connected.add(real_node)
+        for e in transition.edges:
+            if e.edge_type != EdgeType.STRUCTURAL:
+                continue
+            if e.source == t_out and e.target in transition_placeholders:
+                preserve_out.add(real_node)
+            if e.target == t_out and e.source in transition_placeholders:
+                preserve_in.add(real_node)
 
-    # Strip stale structural edges from surviving nodes
     surviving_real = set(output_map.values())
     for edge in list(graph.edges):
         if edge.edge_type != EdgeType.STRUCTURAL:
             continue
-        if edge.source not in surviving_real:
-            continue
-        # External edge?
-        is_external = edge.target not in surviving_real
-        if is_external:
-            if edge.source in output_placeholder_connected:
-                continue  # preserve external edge
-            else:
-                graph.remove_edge(edge)  # remove external edge (no placeholder)
-        else:
-            # Internal edge — remove if not in desired output
+        src_surv = edge.source in surviving_real
+        tgt_surv = edge.target in surviving_real
+        if not src_surv and not tgt_surv:
+            continue  # edge entirely outside the rewrite — untouched
+        if src_surv and tgt_surv:
+            # internal edge — remove unless the transition output wants it
             if (edge.source, edge.target) not in desired_structural:
+                graph.remove_edge(edge)
+            continue
+        # external edge with exactly one surviving endpoint
+        if src_surv:
+            # outgoing external edge from a surviving node
+            if edge.source not in preserve_out:
+                graph.remove_edge(edge)
+        else:  # tgt_surv
+            # incoming external edge into a surviving node
+            if edge.target not in preserve_in:
                 graph.remove_edge(edge)
 
     # ------------------------------------------------------------------
