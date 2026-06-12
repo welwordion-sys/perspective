@@ -368,6 +368,15 @@ def _apply_pass(
                     graph.add_edge(new_src, new_tgt, edge.edge_type)
         if real_node in graph:
             graph.remove_node(real_node)
+        # Node identity carries no information; edge structure does. The merged-away
+        # id is gone, so every downstream reference (output_map, and thus preserve
+        # records + desired_structural + stripping) must follow to the survivor.
+        # Without this, 4c reads output_map at the stale id and strips the
+        # survivor's real edges — making the merge order-dependent in OUTCOME, which
+        # it must not be.
+        for t_out, mapped_real in list(output_map.items()):
+            if mapped_real == real_node:
+                output_map[t_out] = survivor
 
     # Strip deleted nodes into recycle pool, saving external edges per node
     recycle_pool: list[tuple[Node, list[Edge]]] = []
