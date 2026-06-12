@@ -415,6 +415,17 @@ def _apply_pass(
 
         output_map[t_out] = real_node
 
+    # Any nodes still in the recycle pool were stripped of edges (on entry) but
+    # never reused as output reals. Leaving them produces edge-less ORPHAN nodes
+    # (the step-1 markers that outnumbered output demand; see KB
+    # step1_markers_orphaned_on_success). Reuse is an optimisation; removing the
+    # leftovers is the correctness requirement — an unconsumed stripped node must
+    # not survive the rewrite.
+    for leftover_node, _saved in recycle_pool:
+        if leftover_node in graph:
+            graph.remove_node(leftover_node)
+    recycle_pool.clear()
+
     # ------------------------------------------------------------------
     # Step 4c: Strip stale structural edges from surviving nodes.
     # For each surviving node (in output_map.values()), remove structural
@@ -438,45 +449,33 @@ def _apply_pass(
         if src_real is not None and tgt_real is not None:
             desired_structural.add((src_real, tgt_real))
 
-    # Determine which output nodes have placeholder connections, DIRECTIONALLY
-    # (apply_pass_4c_directional_cleanup). The direction is read from the
-    # transition edge between the output node and a placeholder:
-    #   output_node -> placeholder   => may preserve OUTGOING external edges (preserve_out)
-    #   placeholder -> output_node   => may preserve INCOMING external edges (preserve_in)
-    # This mirrors the typed/directional input boundary_specs on the output side.
-    preserve_out: set[Node] = set()
-    preserve_in: set[Node] = set()
+    # Determine which output nodes have placeholder connections (preserve external)
+    output_placeholder_connected: set[Node] = set()
     for t_out, real_node in output_map.items():
-        for e in transition.edges:
-            if e.source == t_out and e.target in transition_placeholders:
-                preserve_out.add(real_node)
-            elif e.target == t_out and e.source in transition_placeholders:
-                preserve_in.add(real_node)
+        if any(
+            (e.source == t_out and e.target in transition_placeholders) or
+            (e.target == t_out and e.source in transition_placeholders)
+            for e in transition.edges
+        ):
+            output_placeholder_connected.add(real_node)
 
-    # Strip stale structural edges from surviving nodes — BOTH directions.
-    # External-edge cleanup is now symmetric: a surviving node's outgoing and
-    # incoming external edges are equally governed, preserved only if the node
-    # carries the matching directional placeholder declaration. Internal edges
-    # (both endpoints surviving) are handled once, keyed off the source.
+    # Strip stale structural edges from surviving nodes
     surviving_real = set(output_map.values())
     for edge in list(graph.edges):
         if edge.edge_type != EdgeType.STRUCTURAL:
             continue
-        src_surv = edge.source in surviving_real
-        tgt_surv = edge.target in surviving_real
-        if not src_surv and not tgt_surv:
-            continue  # edge unrelated to the rewritten region
-        if src_surv and tgt_surv:
-            # Internal edge — remove if not in desired output (handle once).
+        if edge.source not in surviving_real:
+            continue
+        # External edge?
+        is_external = edge.target not in surviving_real
+        if is_external:
+            if edge.source in output_placeholder_connected:
+                continue  # preserve external edge
+            else:
+                graph.remove_edge(edge)  # remove external edge (no placeholder)
+        else:
+            # Internal edge — remove if not in desired output
             if (edge.source, edge.target) not in desired_structural:
-                graph.remove_edge(edge)
-        elif src_surv:
-            # Outgoing external edge from a surviving node.
-            if edge.source not in preserve_out:
-                graph.remove_edge(edge)
-        else:  # tgt_surv
-            # Incoming external edge into a surviving node.
-            if edge.target not in preserve_in:
                 graph.remove_edge(edge)
 
     # ------------------------------------------------------------------
