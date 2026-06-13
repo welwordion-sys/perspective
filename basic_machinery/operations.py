@@ -368,15 +368,6 @@ def _apply_pass(
                     graph.add_edge(new_src, new_tgt, edge.edge_type)
         if real_node in graph:
             graph.remove_node(real_node)
-        # Node identity carries no information; edge structure does. The merged-away
-        # id is gone, so every downstream reference (output_map, and thus preserve
-        # records + desired_structural + stripping) must follow to the survivor.
-        # Without this, 4c reads output_map at the stale id and strips the
-        # survivor's real edges — making the merge order-dependent in OUTCOME, which
-        # it must not be.
-        for t_out, mapped_real in list(output_map.items()):
-            if mapped_real == real_node:
-                output_map[t_out] = survivor
 
     # Strip deleted nodes into recycle pool, saving external edges per node
     recycle_pool: list[tuple[Node, list[Edge]]] = []
@@ -424,28 +415,16 @@ def _apply_pass(
 
         output_map[t_out] = real_node
 
-    # Any nodes still in the recycle pool were stripped of edges (on entry) but
-    # never reused as output reals. Leaving them produces edge-less ORPHAN nodes
-    # (the step-1 markers that outnumbered output demand; see KB
-    # step1_markers_orphaned_on_success). Reuse is an optimisation; removing the
-    # leftovers is the correctness requirement — an unconsumed stripped node must
-    # not survive the rewrite.
-    for leftover_node, _saved in recycle_pool:
-        if leftover_node in graph:
-            graph.remove_node(leftover_node)
-    recycle_pool.clear()
-
     # ------------------------------------------------------------------
-    # Step 4c: Strip stale structural edges from surviving nodes — DIRECTION-SYMMETRIC.
-    # (KB apply_pass_4c_directional_cleanup) The old 4c only iterated edges whose
-    # SOURCE survived, so it governed a surviving node's OUTGOING external edges but
-    # never its INCOMING ones (preserved by omission). That contradicts cut-at-edge
-    # matching (degree counted per (type,direction)) and blocks add_finalise, which
-    # must REDIRECT/strip the parent->operator INCOMING crossing when it consumes the
-    # operator. Now: examine external edges in BOTH directions, governed by directional
-    # placeholder records preserve_out / preserve_in.
+    # Step 4c: Strip stale structural edges from surviving nodes.
+    # For each surviving node (in output_map.values()), remove structural
+    # edges that are NOT present in the output side of the transition.
+    # External edges (to nodes outside real_candidates) are also removed
+    # unless the output node has a placeholder connection in the transition.
     # ------------------------------------------------------------------
 
+    # Build set of (real_src, real_tgt) structural edges that should exist
+    # after the rewrite (from transition output side, excluding markers/placeholders).
     desired_structural: set[tuple] = set()
     for edge in transition.edges:
         if edge.edge_type != EdgeType.STRUCTURAL:
@@ -459,46 +438,33 @@ def _apply_pass(
         if src_real is not None and tgt_real is not None:
             desired_structural.add((src_real, tgt_real))
 
-    # Directional placeholder records. A surviving output node connected to a
-    # placeholder preserves its external edges — but only in the direction(s) the
-    # placeholder edge runs:
-    #   out_node -S-> placeholder   => preserve OUTGOING external edges (preserve_out)
-    #   placeholder -S-> out_node   => preserve INCOMING external edges (preserve_in)
-    # An undirected/legacy placeholder connection (either direction present) is
-    # interpreted per its actual edge direction, so existing rules that only emit
-    # out_node -> placeholder keep exactly their old (preserve_out) behaviour.
-    preserve_out: set[Node] = set()
-    preserve_in: set[Node] = set()
+    # Determine which output nodes have placeholder connections (preserve external)
+    output_placeholder_connected: set[Node] = set()
     for t_out, real_node in output_map.items():
-        for e in transition.edges:
-            if e.source == e.target:
-                continue  # placeholder signature self-loops are not connections
-            if e.source == t_out and e.target in transition_placeholders:
-                preserve_out.add(real_node)
-            if e.target == t_out and e.source in transition_placeholders:
-                preserve_in.add(real_node)
+        if any(
+            (e.source == t_out and e.target in transition_placeholders) or
+            (e.target == t_out and e.source in transition_placeholders)
+            for e in transition.edges
+        ):
+            output_placeholder_connected.add(real_node)
 
+    # Strip stale structural edges from surviving nodes
     surviving_real = set(output_map.values())
     for edge in list(graph.edges):
         if edge.edge_type != EdgeType.STRUCTURAL:
             continue
-        src_surv = edge.source in surviving_real
-        tgt_surv = edge.target in surviving_real
-        if not src_surv and not tgt_surv:
-            continue  # edge entirely outside the rewrite — untouched
-        if src_surv and tgt_surv:
-            # internal edge — remove unless the transition output wants it
-            if (edge.source, edge.target) not in desired_structural:
-                graph.remove_edge(edge)
+        if edge.source not in surviving_real:
             continue
-        # external edge with exactly one surviving endpoint
-        if src_surv:
-            # outgoing external edge from a surviving node
-            if edge.source not in preserve_out:
-                graph.remove_edge(edge)
-        else:  # tgt_surv
-            # incoming external edge into a surviving node
-            if edge.target not in preserve_in:
+        # External edge?
+        is_external = edge.target not in surviving_real
+        if is_external:
+            if edge.source in output_placeholder_connected:
+                continue  # preserve external edge
+            else:
+                graph.remove_edge(edge)  # remove external edge (no placeholder)
+        else:
+            # Internal edge — remove if not in desired output
+            if (edge.source, edge.target) not in desired_structural:
                 graph.remove_edge(edge)
 
     # ------------------------------------------------------------------
@@ -576,3 +542,144 @@ def restore(
     if not success:
         revert(graph, snap)
     return success
+
+
+# ===========================================================================
+# Layer-aware apply (the apply-pass -> layer seam). MINIMAL, upward-only.
+#
+# Non-destructive sibling of apply(): instead of mutating the graph in place,
+# it fires a rule against the graph materialized at a base layer and writes the
+# result as a new sparse delta layer, leaving the base immutable and persisting
+# provenance (the source->result mapping apply() otherwise discards).
+#
+# Approach (KB delta_representation approach 1): materialize base -> rewrite a
+# COPY via the EXISTING _apply_pass (unchanged) -> classify dispositions by
+# node-IDENTITY diff (NO recycle pool) -> derive child roster + write born/
+# changed edge entries -> LayerRecord(UPWARD) with provenance.
+#
+# Implements KB: layer_membership_roster, no_recycle_in_layers,
+# placeholder_designates_layer_entry, and closes delta_representation's seam.
+# Classifier (sideways vs upward) deferred: every firing recorded UPWARD.
+# ===========================================================================
+
+from dataclasses import field as _field
+
+
+@dataclass
+class LayerApplyResult:
+    fired: bool
+    layer_key: object = None
+    provenance: object = None
+    warnings: list = _field(default_factory=list)
+    born: set = _field(default_factory=set)
+    consumed: set = _field(default_factory=set)
+    changed: set = _field(default_factory=set)
+
+
+def _scaffold_signature(node: Node, g: PerspectiveGraph):
+    """Return 'placeholder'/'marker' if node carries scaffold self-loops, else None."""
+    has_s = Edge(node, node, EdgeType.STRUCTURAL) in g
+    has_o = Edge(node, node, EdgeType.OPERATIONAL) in g
+    if has_s and has_o:
+        return 'placeholder'
+    if has_o and not has_s:
+        return 'marker'
+    return None
+
+
+def _incident(node: Node, g: PerspectiveGraph) -> set:
+    return {e for e in g.edges if e.source == node or e.target == node}
+
+
+def apply_to_layer(lg, registry, base_layer, new_layer, operation: OperationDefinition):
+    """
+    Fire `operation` on the graph materialized at `base_layer`, writing the
+    result as `new_layer` (a sparse delta) without mutating the base. Returns a
+    LayerApplyResult describing dispositions; on no-match, fired=False and no
+    layer is written.
+
+    lg       : LayeredGraph (holds per-node edge dicts + per-layer rosters)
+    registry : LayerRegistry (holds one LayerRecord per layer)
+    """
+    # Lazy imports: layers/match_view depend only on graph, but keep them here
+    # so importing operations stays cheap and free of import cycles.
+    from basic_machinery.match_view import derive_match_view, match_cut_at_edge
+    from basic_machinery.layers import (
+        LayerRecord, Provenance, Disposition, TravelType,
+    )
+
+    base = lg.materialize(base_layer)
+    base_nodes = set(base.nodes)
+    base_incident = {n: _incident(n, base) for n in base_nodes}
+
+    # firing decision — same cut-at-edge match as apply()
+    view = derive_match_view(operation.graph2)
+    node_map = match_cut_at_edge(operation.graph2, base, list(base.nodes), view=view)
+    if node_map is None:
+        return LayerApplyResult(fired=False)
+
+    # rewrite a COPY (base is never mutated)
+    work = base.copy()
+    _apply_pass(work, node_map, operation.graph2)
+
+    # strip surviving scaffold (orphaned markers/placeholders) before the diff —
+    # a clean firing leaves none; any that survive must not enter the layer.
+    scaffold = {n for n in work.nodes if _scaffold_signature(n, work) is not None}
+    warnings: list = []
+    if scaffold:
+        warnings.append(
+            f"{len(scaffold)} scaffold node(s) survived the rewrite and were "
+            f"excluded from the layer: {sorted(n.id for n in scaffold)}"
+        )
+    result_nodes = set(work.nodes) - scaffold
+
+    # classify dispositions by IDENTITY diff (no recycle pool)
+    born = result_nodes - base_nodes
+    consumed = base_nodes - result_nodes
+    survived = base_nodes & result_nodes
+    work_incident = {n: _incident(n, work) for n in result_nodes}
+    changed = {n for n in survived
+               if base_incident.get(n, set()) != work_incident.get(n, set())}
+
+    # recycle-aliasing smell: survivor sharing NO edge with its base form
+    for n in changed:
+        before = base_incident.get(n, set()); after = work_incident.get(n, set())
+        if before and after and not (before & after):
+            warnings.append(
+                f"node {n.id} survived but shares NO edge with its base form "
+                f"(possible recycle-aliasing in _apply_pass; see no_recycle_in_layers)"
+            )
+
+    # child roster: parent - consumed + born
+    child_roster = lg.derive_roster(parent=base_layer, consumed=consumed, born=born)
+    lg.set_roster(new_layer, child_roster)
+    present = set(child_roster)
+
+    # write explicit edge entries for born + changed nodes (entries COMPLETE:
+    # include crossing edges, but only to roster-present endpoints)
+    for n in (born | changed):
+        incident = {e for e in work_incident.get(n, set())
+                    if e.source in present and e.target in present}
+        lg.set_edges(n, new_layer, incident)
+        if n not in lg.nodes:
+            lg.adopt_node(n)
+
+    # provenance (minimal seam: every firing UPWARD)
+    prov = Provenance()
+    for n in survived:
+        prov.add(source=n, result=n, disposition=Disposition.MAPPED)
+    for n in consumed:
+        prov.add(source=n, result=None, disposition=Disposition.CONSUMED)
+    for n in born:
+        prov.add(source=None, result=n, disposition=Disposition.BORN)
+
+    registry.add(LayerRecord(
+        key=new_layer, travel_type=TravelType.UPWARD,
+        ruleset=frozenset({operation.name}), provenance=prov,
+        parents=(base_layer,),
+    ))
+
+    return LayerApplyResult(
+        fired=True, layer_key=new_layer, provenance=prov, warnings=warnings,
+        born=born, consumed=consumed, changed=changed,
+    )
