@@ -176,6 +176,17 @@ class LayeredGraph:
         self._next_id: int = 0
         # orders a set of layer keys oldest->newest; override for DAG topologies
         self._key_order = key_order or (lambda keys: sorted(keys))
+        # --- per-layer node roster (membership) -------------------------------
+        # layer_key -> frozenset[Node] present at that layer. AUTHORITATIVE for
+        # presence (see KB layer_membership_roster): materialize and presence
+        # tests read the roster, NOT self._nodes (which is all-nodes-ever and
+        # grows unbounded as fresh born nodes are minted per no_recycle_in_layers).
+        # frozenset enforces committed-layer immutability — a layer's roster does
+        # not change after creation; a new layer clones the parent's and mutates
+        # the COPY (parent - consumed/merged + born). The two stores are
+        # orthogonal (delta_representation): _roster answers "who is present at L",
+        # _edges_at answers "what each present node looks like".
+        self._roster: dict[LayerKey, frozenset[Node]] = {}
 
     # --- node management ---
 
@@ -191,6 +202,35 @@ class LayeredGraph:
         self._nodes.add(node)
         self._edges_at.setdefault(node, {})
         self._next_id = max(self._next_id, node.id + 1)
+
+    # --- per-layer roster (membership) ---
+
+    def set_roster(self, layer: LayerKey, nodes: Iterable[Node]) -> None:
+        """Store the node membership of `layer` (authoritative for presence).
+        Frozen so a committed layer's roster cannot be mutated in place."""
+        self._roster[layer] = frozenset(nodes)
+
+    def roster(self, layer: LayerKey) -> frozenset[Node]:
+        """The set of real nodes present at `layer`. Empty frozenset if the
+        layer has no recorded roster (e.g. queried before creation)."""
+        return self._roster.get(layer, frozenset())
+
+    def present(self, node: Node, layer: LayerKey) -> bool:
+        """O(1) presence test: is `node` in `layer`'s roster?"""
+        return node in self._roster.get(layer, frozenset())
+
+    def derive_roster(self, parent: LayerKey | None,
+                      consumed: Iterable[Node] = (),
+                      born: Iterable[Node] = ()) -> frozenset[Node]:
+        """Compute a child layer's roster by CLONING the parent's and mutating
+        the copy: (parent_roster - consumed) | born. The parent roster is never
+        touched (it is frozen). `parent=None` means base layer: roster = born
+        (the initially committed node set). This is the membership delta from
+        KB layer_membership_roster; `consumed` covers both CONSUMED and MERGED
+        dispositions (both leave the roster), `born` covers freshly minted nodes
+        (no recycling — see no_recycle_in_layers)."""
+        base = self._roster.get(parent, frozenset()) if parent is not None else frozenset()
+        return frozenset((set(base) - set(consumed)) | set(born))
 
     @property
     def nodes(self) -> frozenset[Node]:
@@ -261,24 +301,34 @@ class LayeredGraph:
 
     def materialize(self, layer: LayerKey) -> PerspectiveGraph:
         """
-        Reconstruct the full flat graph at `layer` by resolving every node's
-        edges. This is the read path the matcher/decoder consume, and the basis
-        for the deferred 'ground layer' operation (materialize -> use as new
-        explicit delta base).
+        Reconstruct the full flat graph at `layer` by resolving the edges of
+        every node PRESENT at that layer. Presence is read from the layer roster
+        (authoritative; see KB layer_membership_roster), NOT from self._nodes —
+        self._nodes is all-nodes-ever and grows unbounded as fresh born nodes are
+        minted (no_recycle_in_layers), so iterating it would be both wrong
+        (includes nodes not present at L, e.g. consumed ones whose edges would
+        resurrect via fallback) and increasingly expensive. The roster excludes
+        consumed/merged nodes by omission, which is exactly why no explicit empty
+        edge-entry is needed for deleted nodes.
+
+        Fallback: if no roster is recorded for `layer`, fall back to the legacy
+        all-nodes scan so older call sites keep working.
         """
         g = PerspectiveGraph()
-        # register nodes that exist at this layer (have a resolvable entry OR
-        # are layer-0 origins with an empty entry)
-        present = [n for n in self._nodes if self._resolve_key(n, layer) is not None
-                   or n in self._edges_at and self._edges_at[n]]
-        # fall back: include every known node (a node with no edges is still a node)
-        present = list(self._nodes)
+        if layer in self._roster:
+            present = list(self._roster[layer])
+        else:
+            present = list(self._nodes)
         g._nodes = set(present)
         g._next_id = self._next_id
         edges: set[Edge] = set()
         for n in present:
             edges |= self.edges_of(n, layer)
-        g._edges = edges
+        # only keep edges whose BOTH endpoints are present at this layer — a
+        # resolved edge to a node absent from the roster (e.g. a consumed
+        # neighbour) must not appear in the materialized graph.
+        present_set = set(present)
+        g._edges = {e for e in edges if e.source in present_set and e.target in present_set}
         return g
 
     # --- invariant check ---
