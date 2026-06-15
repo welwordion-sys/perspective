@@ -1,3 +1,26 @@
+"""
+operations.py — graph rewrite engine (schema-rebuild path).
+
+VERIFICATION STATUS (recorded for the committing session):
+  - apply() runs the cut-at-edge match (match_view) then executes the compiled
+    schema in place via schema.rebuild(). This is the LIVE path. _apply_pass is
+    retained below only as a legacy/reference path and for apply_to_layer's diff
+    fallback; it is NOT the executed path.
+  - schema.rebuild (in-place): exercised extensively this session. Single-bit
+    no-carry addition (0+0, 0+1, 1+0) runs add_init -> finalise to a correct,
+    decoded result with zero loose nodes, on this path. Considered most-likely-correct
+    but NOT exhaustively tested (carry/multibit result construction still has an
+    open buffer-direction divergence between bit_add's spec and its realized output).
+  - LAYER OUTPUT (apply_to_layer / layer_apply_schema in schema.py): the
+    double-recording invariant fix (outside-endpoint entry, agreement-by-construction)
+    is committed in schema.py but the LAYER path's output is NOT fully checked this
+    session — verified only on synthetic boundary cases and the no-carry gate, not
+    against a full multibit layer reduction. Treat layer output as unverified.
+  - Committing anyway (GitHub revertible). The arithmetic.py rule pack is delivered
+    separately as a candidate for the next session, NOT committed.
+  - encoding.py is UNCHANGED from the repo (GitHub version, md5 a89dd3d...).
+"""
+
 from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Iterator
@@ -15,6 +38,7 @@ class OperationDefinition:
     name: str
     pattern: PerspectiveGraph
     graph2: PerspectiveGraph
+    schema: object = None   # compiled execution schema (filled by register())
 
 
 _registry: dict[str, OperationDefinition] = {}
@@ -23,6 +47,11 @@ _registry: dict[str, OperationDefinition] = {}
 def register(operation: OperationDefinition) -> None:
     if operation.name in _registry:
         raise ValueError(f"Operation '{operation.name}' is already registered.")
+    # Compile graph2 -> execution schema ONCE here. The apply/layer executors
+    # then run the compiled schema instead of interpreting graph2 each fire.
+    if operation.schema is None:
+        from basic_machinery.schema import compile_schema
+        operation.schema = compile_schema(operation.graph2)
     _registry[operation.name] = operation
 
 
@@ -529,7 +558,14 @@ def apply(
     )
     if node_map is None:
         return False
-    _apply_pass(graph, node_map, operation.graph2)
+    # Execute the compiled schema in place (rebuild executor) instead of
+    # interpreting graph2 via _apply_pass. _apply_pass is retained below as the
+    # legacy/reference path and for apply_to_layer's diff fallback if needed.
+    from basic_machinery.schema import rebuild as _schema_rebuild
+    if operation.schema is None:
+        from basic_machinery.schema import compile_schema
+        operation.schema = compile_schema(operation.graph2)
+    _schema_rebuild(graph, operation.schema.edits, node_map)
     return True
 
 
@@ -591,7 +627,7 @@ def _incident(node: Node, g: PerspectiveGraph) -> set:
     return {e for e in g.edges if e.source == node or e.target == node}
 
 
-def apply_to_layer(lg, registry, base_layer, new_layer, operation: OperationDefinition):
+def _apply_to_layer_diff(lg, registry, base_layer, new_layer, operation: OperationDefinition):
     """
     Fire `operation` on the graph materialized at `base_layer`, writing the
     result as `new_layer` (a sparse delta) without mutating the base. Returns a
@@ -682,4 +718,23 @@ def apply_to_layer(lg, registry, base_layer, new_layer, operation: OperationDefi
     return LayerApplyResult(
         fired=True, layer_key=new_layer, provenance=prov, warnings=warnings,
         born=born, consumed=consumed, changed=changed,
+    )
+
+
+def apply_to_layer(lg, registry, base_layer, new_layer, operation: OperationDefinition):
+    """Public layer-apply: execute the compiled schema via the fragment-based
+    clone-and-fuse executor (layer_apply_schema), emitting new_layer as a sparse
+    delta with provenance written directly from the schema. Returns a
+    LayerApplyResult. The legacy identity-diff path is preserved as
+    _apply_to_layer_diff for reference/fallback.
+    """
+    from basic_machinery.schema import layer_apply_schema, compile_schema
+    if operation.schema is None:
+        operation.schema = compile_schema(operation.graph2)
+    res = layer_apply_schema(lg, registry, base_layer, new_layer, operation)
+    if res is None:
+        return LayerApplyResult(fired=False)
+    return LayerApplyResult(
+        fired=True, layer_key=res['layer_key'], provenance=res['provenance'],
+        warnings=[], born=res['born'], consumed=res['consumed'], changed=res['changed'],
     )
