@@ -58,6 +58,14 @@ class MatchView:
     """
     bind_targets: set[Node] = field(default_factory=set)
     expected_degree: dict[Node, dict[DegreeKey, int]] = field(default_factory=dict)
+    # expected CROSSING degree per bind target: the component of expected_degree
+    # that goes to placeholders (i.e. leaves the matched region). Kept separate so
+    # the matcher can require the internal/crossing SPLIT to match, not just the
+    # total. Without this, a real node satisfies an expected-internal slot with a
+    # crossing edge (e.g. a result spine whose 2nd OP-out leaves the region),
+    # matching a variant it should not. expected_degree stays the TOTAL (cut-at-edge
+    # design preserved); this only restores the split derivation threw away.
+    expected_crossing: dict[Node, dict[DegreeKey, int]] = field(default_factory=dict)
 
 
 def _is_mapping_edge(edge: Edge, markers: set[Node], placeholders: set[Node]) -> bool:
@@ -119,6 +127,7 @@ def derive_match_view(input_graph: PerspectiveGraph) -> MatchView:
 
     for n in bind_targets:
         deg: dict[DegreeKey, int] = {}
+        cross: dict[DegreeKey, int] = {}
         # A structural self-loop on a bind target is a REAL edge (bit value 1),
         # not an encoding signal, and must count toward total degree. Operational
         # self-loops belong to markers/placeholders (not bind targets) and are
@@ -138,6 +147,8 @@ def derive_match_view(input_graph: PerspectiveGraph) -> MatchView:
                 continue
             key = (e.edge_type, 'out')
             deg[key] = deg.get(key, 0) + 1
+            if e.target in placeholders:
+                cross[key] = cross.get(key, 0) + 1
         # In edges
         for e in input_graph.edges_to(n):
             if e.source == e.target:
@@ -149,7 +160,10 @@ def derive_match_view(input_graph: PerspectiveGraph) -> MatchView:
                 continue
             key = (e.edge_type, 'in')
             deg[key] = deg.get(key, 0) + 1
+            if e.source in placeholders:
+                cross[key] = cross.get(key, 0) + 1
         view.expected_degree[n] = deg
+        view.expected_crossing[n] = cross
 
     return view
 
@@ -288,8 +302,38 @@ def match_cut_at_edge(
 
     result: dict[Node, Node] = {}
 
+    def crossing_ok(mapping: dict) -> bool:
+        """Full-binding check: each bound node's CROSSING degree (edges leaving the
+        matched region) must equal the bind target's declared expected_crossing.
+        Internal relations are already confirmed by consistent(); this restores the
+        internal/crossing SPLIT the total-degree cut discards, so a node cannot
+        satisfy an expected-internal slot with an edge that leaves the region."""
+        region = set(mapping.values())
+        for t, g in mapping.items():
+            exp_cross = view.expected_crossing.get(t, {})
+            real_cross: dict[DegreeKey, int] = {}
+            if Edge(g, g, EdgeType.STRUCTURAL) in graph:
+                pass  # self-loop is internal, never crossing
+            for e in graph.edges_from(g):
+                if e.source == e.target:
+                    continue
+                if e.target not in region:
+                    k = (e.edge_type, 'out')
+                    real_cross[k] = real_cross.get(k, 0) + 1
+            for e in graph.edges_to(g):
+                if e.source == e.target:
+                    continue
+                if e.source not in region:
+                    k = (e.edge_type, 'in')
+                    real_cross[k] = real_cross.get(k, 0) + 1
+            if real_cross != exp_cross:
+                return False
+        return True
+
     def backtrack(depth: int, mapping: dict, reverse: dict) -> bool:
         if depth == len(order):
+            if not crossing_ok(mapping):
+                return False
             result.update(mapping)
             return True
         t = order[depth]
