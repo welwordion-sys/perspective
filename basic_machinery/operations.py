@@ -738,3 +738,90 @@ def apply_to_layer(lg, registry, base_layer, new_layer, operation: OperationDefi
         fired=True, layer_key=res['layer_key'], provenance=res['provenance'],
         warnings=[], born=res['born'], consumed=res['consumed'], changed=res['changed'],
     )
+
+
+# ===========================================================================
+# CANONICAL LAYERED DRIVER
+#
+# Layer output is the canonical execution model: every firing writes a new
+# sparse delta layer over an immutable base, persisting provenance. Flat apply()
+# (rebuild, in place) is retained as the layer-0 / compatibility path.
+#
+# These drivers own the layer state (LayeredGraph + LayerRegistry + integer
+# layer keys) and call apply_to_layer per step. apply_to_layer is self-contained
+# (it materializes the base, matches, fires, writes the delta), so the driver's
+# only job is bookkeeping: pick the next layer key, advance the cursor, stop at
+# fixpoint.
+#
+# Invariant after each fired step: lg.validate(new_layer) == [] and
+# lg.materialize(new_layer) is the graph the flat rebuild path would produce.
+# ===========================================================================
+
+def init_layered(graph: PerspectiveGraph):
+    """Seed a LayeredGraph + LayerRegistry from a flat graph as layer 0.
+    Returns (lg, registry, base_layer=0). The flat graph is the ground layer;
+    every node is adopted and its incident edges written as the layer-0 entry,
+    and the layer-0 roster is the full node set."""
+    from basic_machinery.layers import LayeredGraph, LayerRegistry
+    lg = LayeredGraph()
+    registry = LayerRegistry()
+    for n in graph.nodes:
+        lg.adopt_node(n)
+    lg.set_roster(0, set(graph.nodes))
+    for n in graph.nodes:
+        incident = {e for e in graph.edges if e.source == n or e.target == n}
+        lg.set_edges(n, 0, incident)
+    return lg, registry, 0
+
+
+def apply_layer(lg, registry, operation: OperationDefinition,
+                base_layer, new_layer=None):
+    """Canonical single-step apply: fire `operation` on the graph materialized
+    at `base_layer`, writing the result as `new_layer` (default base_layer+1 when
+    keys are ints). Returns a LayerApplyResult; fired=False if no match (no layer
+    written). This is the layer-native analogue of flat apply()."""
+    if new_layer is None:
+        new_layer = base_layer + 1
+    return apply_to_layer(lg, registry, base_layer, new_layer, operation)
+
+
+def reduce_layered(graph: PerspectiveGraph, operations_iter=None,
+                   max_steps=1000, validate_each=True):
+    """Drive a full layered reduction from a flat graph to fixpoint.
+
+    Seeds layer 0 from `graph`, then repeatedly fires the first operation that
+    matches the current layer, advancing one layer per firing, until nothing
+    matches or max_steps is hit. Each firing writes a sparse delta layer with
+    provenance; the base layers stay immutable.
+
+    operations_iter: iterable of OperationDefinition to try in order each step.
+                     Defaults to the full registry (sorted by name for
+                     determinism).
+    Returns (lg, registry, final_layer, fired_sequence). If validate_each, raises
+    ValueError on the first layer that fails the double-recording invariant —
+    that is the canonical correctness gate."""
+    lg, registry, layer = init_layered(graph)
+    if operations_iter is None:
+        ops = [lookup(n) for n in sorted(_registry)]
+    else:
+        ops = list(operations_iter)
+    fired_sequence = []
+    for _ in range(max_steps):
+        progressed = False
+        for op in ops:
+            res = apply_layer(lg, registry, op, base_layer=layer, new_layer=layer + 1)
+            if res.fired:
+                if validate_each:
+                    problems = lg.validate(layer + 1)
+                    if problems:
+                        raise ValueError(
+                            f"layer {layer + 1} fails double-recording invariant "
+                            f"after firing {op.name}: {problems}"
+                        )
+                layer += 1
+                fired_sequence.append(op.name)
+                progressed = True
+                break
+        if not progressed:
+            break
+    return lg, registry, layer, fired_sequence

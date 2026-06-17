@@ -64,7 +64,12 @@ class TravelType(Enum):
 class Disposition(Enum):
     """What happened to a source node under an upward firing."""
     MAPPED = auto()     # source corresponds 1:1 to a result node
-    MERGED = auto()     # source folded into another result node
+    INHERITED = auto()  # source's crossings inherited by a result via a non-identity
+                        # mapping (NOT identity-inheritance, which is MAPPED). Covers
+                        # both one-input->many-results (split: each result inherits the
+                        # shared source's accepted crossings) and many-inputs->one-result
+                        # (fusion: the result inherits from every mapping source). It is
+                        # NOT a fold-in/merge — the old name MERGED was misleading.
     CONSUMED = auto()   # source destroyed, no result correspondent
     BORN = auto()       # result node with no source (domain entry is the result side)
 
@@ -226,7 +231,7 @@ class LayeredGraph:
         the copy: (parent_roster - consumed) | born. The parent roster is never
         touched (it is frozen). `parent=None` means base layer: roster = born
         (the initially committed node set). This is the membership delta from
-        KB layer_membership_roster; `consumed` covers both CONSUMED and MERGED
+        KB layer_membership_roster; `consumed` covers both CONSUMED and INHERITED
         dispositions (both leave the roster), `born` covers freshly minted nodes
         (no recycling — see no_recycle_in_layers)."""
         base = self._roster.get(parent, frozenset()) if parent is not None else frozenset()
@@ -340,8 +345,20 @@ class LayeredGraph:
         Empty list = consistent.
         """
         problems: list[str] = []
-        for n in self._nodes:
+        # Presence is the roster (authoritative; see materialize). A node absent
+        # from the layer (consumed/merged) must NOT be checked: with no entry at
+        # `layer` its edges resolve via fallback to an earlier layer and would
+        # resurrect stale edges (e.g. a consumed node's old crossing), producing
+        # phantom violations. Mirror materialize: only roster-present nodes, and
+        # only edges whose BOTH endpoints are present.
+        if layer in self._roster:
+            present = set(self._roster[layer])
+        else:
+            present = set(self._nodes)
+        for n in present:
             for e in self.edges_of(n, layer):
+                if e.source not in present or e.target not in present:
+                    continue
                 other = e.target if e.source == n else e.source
                 if e not in self.edges_of(other, layer):
                     problems.append(
