@@ -87,6 +87,17 @@ def _is_mapping_edge(edge: Edge, markers: set[Node], placeholders: set[Node]) ->
     return True
 
 
+
+def _marker_chain_far(node, m, input_graph):
+    """Far endpoints of the marker chain hanging off `node` through marker `m`.
+    For out: node ->S-> m ->S-> X  => returns X's. For in: X ->S-> m ->S-> node."""
+    outs = [e.target for e in input_graph.edges_from(m, EdgeType.STRUCTURAL)
+            if e.target != m and e.target != node]
+    ins  = [e.source for e in input_graph.edges_to(m, EdgeType.STRUCTURAL)
+            if e.source != m and e.source != node]
+    return outs, ins
+
+
 def derive_match_view(input_graph: PerspectiveGraph) -> MatchView:
     """
     Derive the cut-at-edge match view from an input graph.
@@ -143,7 +154,11 @@ def derive_match_view(input_graph: PerspectiveGraph) -> MatchView:
             # An edge to a marker is the FIRST hop of a marker chain encoding a
             # real OPERATIONAL crossing/edge. Count it as one operational-out.
             if e.target in markers:
-                deg[(EdgeType.OPERATIONAL, 'out')] = deg.get((EdgeType.OPERATIONAL, 'out'), 0) + 1
+                k = (EdgeType.OPERATIONAL, 'out')
+                deg[k] = deg.get(k, 0) + 1
+                fouts, _ = _marker_chain_far(n, e.target, input_graph)
+                if any(x in placeholders for x in fouts):
+                    cross[k] = cross.get(k, 0) + 1
                 continue
             key = (e.edge_type, 'out')
             deg[key] = deg.get(key, 0) + 1
@@ -156,7 +171,11 @@ def derive_match_view(input_graph: PerspectiveGraph) -> MatchView:
             if _is_mapping_edge(e, markers, placeholders):
                 continue
             if e.source in markers:
-                deg[(EdgeType.OPERATIONAL, 'in')] = deg.get((EdgeType.OPERATIONAL, 'in'), 0) + 1
+                k = (EdgeType.OPERATIONAL, 'in')
+                deg[k] = deg.get(k, 0) + 1
+                _, fins = _marker_chain_far(n, e.source, input_graph)
+                if any(x in placeholders for x in fins):
+                    cross[k] = cross.get(k, 0) + 1
                 continue
             key = (e.edge_type, 'in')
             deg[key] = deg.get(key, 0) + 1
