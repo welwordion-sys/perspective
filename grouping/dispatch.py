@@ -71,10 +71,19 @@ class GroupMatcher:
 def agglomerate(rule_names, c_min, f):
     clusters = [frozenset([nm]) for nm in rule_names]
     cores = {}  # cluster -> (shared_abs, min_ratio)  (singleton = its own size)
+    degraded = []  # rules that could not be anchored on their own (GA-safety)
     for c in clusters:
         nm = next(iter(c))
-        v = group_core([ops._registry[nm]])
-        cores[c] = (v['shared_size'], 1.0)
+        try:
+            v = group_core([ops._registry[nm]])
+            cores[c] = (v['shared_size'], 1.0)
+        except GroupCoreError:
+            # Un-anchorable rule (e.g. malformed/symmetric GA output). It stays a
+            # singleton cluster and will be matched directly via its own match.
+            # It can never merge (union_core will raise -> None), so it is a
+            # permanent ground leaf. Recorded, not swallowed.
+            cores[c] = (None, None)
+            degraded.append(nm)
     dendro = []  # (childA, childB, shared_abs, min_ratio)
 
     def union_core(ca, cb):
@@ -104,20 +113,28 @@ def agglomerate(rule_names, c_min, f):
         cores[merged] = (abs_, ratio)
         dendro.append((ca, cb, abs_, ratio))
 
-    return clusters, cores, dendro
+    return clusters, cores, dendro, degraded
 
 
 def build_groups(rule_names, c_min=5, f=0.5):
-    clusters, cores, dendro = agglomerate(rule_names, c_min, f)
+    clusters, cores, dendro, degraded = agglomerate(rule_names, c_min, f)
     matchers = []
     for c in clusters:
         members = sorted(c)
         if len(members) == 1:
             core_info = None
         else:
-            core_info = group_core([ops._registry[m] for m in members])
+            try:
+                core_info = group_core([ops._registry[m] for m in members])
+            except GroupCoreError:
+                # Should not happen — a multi-member cluster only formed because
+                # union_core succeeded — but guard anyway so a GA edge case
+                # degrades the group to confirmation-only dispatch instead of
+                # crashing. Members still match correctly via their own views.
+                core_info = None
+                degraded.extend(m for m in members if m not in degraded)
         matchers.append(GroupMatcher(members, core_info))
-    return matchers, dendro
+    return matchers, dendro, degraded
 
 
 # ---- Equivalence check: grouped dispatch vs flat per-rule baseline ----

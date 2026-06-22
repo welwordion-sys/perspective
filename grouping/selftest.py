@@ -8,7 +8,7 @@ from basic_machinery.operations import apply
 from dispatch import build_groups, flat_baseline, grouped_dispatch
 
 bit_add = sorted(n for n in ops._registry if n.startswith('bit_add'))
-matchers, _ = build_groups(bit_add, c_min=5, f=0.5)
+matchers, _, degraded = build_groups(bit_add, c_min=5, f=0.5)
 ALL = list(ops._registry.keys())
 
 def fresh(e):
@@ -29,6 +29,7 @@ for expr in ["1+1","2+3","3+5","6+7","5+6","7+7","4+1","2+2"]:
         if step(g) is None: break
 groups = [sorted(m.members) for m in matchers]
 assert len(matchers) == 2, f"expected 2 groups, got {len(matchers)}"
+assert degraded == [], f"well-formed bit_add should degrade nothing, got {degraded}"
 print(f"groups={groups}")
 print(f"checks={chk} mismatches={mm}")
 if mm: print("FAIL"); sys.exit(1)

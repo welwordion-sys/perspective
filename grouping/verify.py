@@ -6,7 +6,7 @@ from dispatch import build_groups, flat_baseline, grouped_dispatch
 from basic_machinery.operations import apply
 
 bit_add_names = sorted(n for n in ops._registry if n.startswith('bit_add'))
-matchers, dendro = build_groups(bit_add_names, c_min=5, f=0.5)
+matchers, dendro, degraded = build_groups(bit_add_names, c_min=5, f=0.5)
 print("groups:", [sorted(m.members) for m in matchers])
 
 # Generate real graph states by encoding additions and driving them through
