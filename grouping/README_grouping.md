@@ -37,20 +37,26 @@ Mechanism (mirrors the system's own GA philosophy): grow a POPULATION of varied
 random edge-walks, not one subgraph. The shared core is the UNION of edges matched
 across the population, NOT the intersection of their prefixes (measured: union
 recovers 60/60 core edges incl. the island; consensus/intersection recovers 0).
-Uses NO node-id correspondence — walks match by edge content — so this is the path
-that should generalize to GA graphs where intersection-by-id is unavailable.
+The WALK strategy is id-agnostic, but MATCHING is by edge-tuple equality (includes
+node IDs) — so this does NOT in fact generalize to id-free graphs (see below).
 
 Per-edge delta-tally feedback (soft bias toward high-match/low-stop edges, never
 zero probability) cuts sequences-to-full-coverage 2.7–5x, most on the hardest
 (most-delta) case. The ONLY strategy knob is `_choose_next` — the clean seam a
 traveler strategy replaces, consuming the tally as a feature.
 
-VALIDATED ONLY on shared-id carriers against an id-based ground truth. The id-free
-generalization (the actual reason to prefer this over intersection-by-id) is
-argued but UNMEASURED — no non-shared-id structurally-related pair exists yet.
-Two regimes this clarifies: shared-id members (authored carriers, GA mutations of
-one parent) → intersection-by-id is exact and trivial; independent-lineage members
-(recombination, cross-lineage) → need this id-free structural method.
+VALIDATED on shared-id carriers (union recovers 60/60 incl. island). The id-free
+claim was TESTED and FALSIFIED: matching is by edge-tuple equality, which includes
+node IDs, so a graph vs its own relabeling recovers 0 edges (see test_idfree.py).
+pop_core is therefore NOT id-free — it works only for shared-id members, where it
+duplicates the trivial intersection-by-id more expensively. The id-dependence
+lives in the matching step (`e in other_set`), not the walk strategy; making it
+id-free requires matching edges by structural ROLE, which is the unsolved
+node-correspondence problem the population walk relocated rather than solved.
+The genuine surviving contribution is the feedback-tally search efficiency (3–5x).
+Two regimes: shared-id members (authored carriers, GA mutations of one parent) →
+intersection-by-id, exact and trivial; independent lineages (recombination,
+cross-lineage) → still need an id-free structural method that does not yet exist.
 
 See test_pop_core.py (regression: union recovers full core incl. island; feedback
 beats blind).

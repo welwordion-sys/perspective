@@ -15,11 +15,22 @@ IDEA (population search, mirroring the system's own GA philosophy):
     intersection of their prefixes. No single walk covers the core; the population
     collectively does. (Measured: union recovers 60/60 core edges; consensus/
     intersection recovers 0 — consensus is the wrong reading.)
-  - Uses NO node-id correspondence: walks match by edge content, so this is the
-    mechanism that should generalize to GA graphs where intersection-by-id is
-    unavailable (regime 2). NOTE: validated only on shared-id carriers against an
-    id-based ground truth; the id-free case is argued, not yet measured (no GA pair
-    exists yet).
+  - MATCHING IS BY EDGE-TUPLE EQUALITY, WHICH INCLUDES NODE IDS. The agreement
+    check `e in other_set` compares (src,tgt,kind,type) tuples, so two graphs match
+    only where they share node IDs. TESTED (test_idfree.py): a graph vs its own
+    relabeling recovers 0 edges. So this is NOT id-free, despite the population
+    walk strategy itself being id-agnostic — the id-dependence lives in the
+    matching step, not the walk.
+  - CONSEQUENCE: pop_core works ONLY for shared-id members (authored carriers, GA
+    mutations of one parent that preserve ids), where it duplicates the trivial
+    intersection-by-id more expensively. On the id-free case it was meant for
+    (recombination / cross-lineage GA output), it does NOTHING as written. Making
+    it id-free requires matching edges by structural ROLE, which is the
+    unsolved node-correspondence problem (anchors/islands/placeholder semantics) —
+    the population walk relocated that problem into `e in other_set`, it did not
+    solve it.
+  - The one genuine contribution is the FEEDBACK-TALLY search efficiency below
+    (3–5x fewer sequences), independent of the id issue.
 
 FEEDBACK (per-edge delta tally, soft bias):
   - After each walk, matched edges get +match; the stopping edge gets +stop.
@@ -132,8 +143,8 @@ def find_core(src_edges, other_set, n_sequences=200, use_feedback=True, seed=0):
 def core_and_deltas(member_edge_sets):
     """Convenience: given {name: set(edges)}, find the core (union-coverage against
     the intersection of all members) and each member's delta (edges not in core).
-    For shared-id members this equals intersection-by-id; for non-shared-id members
-    this is the population estimate (the general, id-free path)."""
+    Works for SHARED-ID members only (matching is id-based; see module docstring
+    and test_idfree.py). For shared-id members this equals intersection-by-id."""
     names = list(member_edge_sets)
     # core must be present in ALL others; use intersection of all as the target so
     # the union-coverage core converges to the genuinely-shared edges.
