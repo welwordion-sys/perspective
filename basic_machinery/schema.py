@@ -45,7 +45,7 @@ class SchemaCore:
     delete: set[Node] = field(default_factory=set)            # input nodes consumed
     inherit: dict[Node, Node] = field(default_factory=dict)   # out_node -> in_node
     born: set[Node] = field(default_factory=set)              # out_nodes, no inherit
-    # input->output mapping (which inputs map to each output). Needed for INHERITED
+    # input->output mapping (which inputs map to each output). Needed for MERGED
     # provenance: a non-inheriting input that maps to an output folds into it.
     mapping_in: dict = field(default_factory=dict)            # out_node -> set[in_node]
     # output structure (both endpoints are output nodes)
@@ -401,7 +401,7 @@ def rebuild(graph: PerspectiveGraph, edits: EditsArtifact, binding: dict) -> dic
 
 # ===========================================================================
 # PROVENANCE — written DIRECTLY from compiled dispositions + binding + output_map.
-# No identity-diff reconstruction: the schema already knows MAPPED/INHERITED/
+# No identity-diff reconstruction: the schema already knows MAPPED/MERGED/
 # CONSUMED/BORN. This is what apply_to_layer persists on an UPWARD LayerRecord.
 # ===========================================================================
 
@@ -413,10 +413,8 @@ def provenance_from_schema(core: SchemaCore, binding: dict, output_map: dict):
 
     MAPPED   : an inherited output — its identity-source input's real node maps
                1:1 to the output's real node (same real node).
-    INHERITED: an input that maps to an output but is NOT that output's identity
-               source. The output inherits this input's accepted crossings via the
-               mapping (mapping = inheritance). Covers split (one input -> many
-               outputs) and fusion (many inputs -> one output) alike. NOT a fold-in.
+    MERGED   : an input that maps to an output but is NOT that output's identity
+               source — it folds into the output's real node.
     CONSUMED : a delete-set input — destroyed, no result.
     BORN     : a born output — created, no source.
     """
@@ -428,14 +426,9 @@ def provenance_from_schema(core: SchemaCore, binding: dict, output_map: dict):
         prov.add(source=binding[in_node], result=output_map[out_node],
                  disposition=Disposition.MAPPED)
 
-    # INHERITED — inputs mapping to an output whose IDENTITY they are not the
-    # source of. The output still inherits this input's accepted crossings via the
-    # mapping (mapping = inheritance). An input may map to several outputs; it is
-    # INHERITED by each one it is not the identity source of. Born outputs are
-    # included: a born node with a boundary connection inherits its accepted
-    # crossings from its mapping source(s). Acceptance is decided per output by its
-    # own boundary declaration (placeholder/marker-chain), so an output that
-    # declares no boundary inherits nothing even though the mapping exists.
+    # MERGED — inputs mapping to an output that they do NOT inherit. Each folds
+    # into that output's real node. (An input could map to several outputs; it
+    # merges into each it is not the identity source of.)
     for out_node, srcs in core.mapping_in.items():
         identity_src = core.inherit.get(out_node)
         for in_node in srcs:
@@ -444,7 +437,7 @@ def provenance_from_schema(core: SchemaCore, binding: dict, output_map: dict):
             if in_node in core.delete:
                 continue  # consumed elsewhere; not a merge
             prov.add(source=binding[in_node], result=output_map[out_node],
-                     disposition=Disposition.INHERITED)
+                     disposition=Disposition.MERGED)
 
     # CONSUMED — delete-set inputs
     for in_node in core.delete:
@@ -565,6 +558,28 @@ def layer_apply_schema(lg, registry, base_layer, new_layer, operation):
                   {e for e in result_incident.get(n, set())
                    if e.source in present and e.target in present}}
 
+    # MERGE-NEIGHBOUR / BYSTANDER fix. A roster-present node that the rule did
+    # NOT touch (not survived, not born, not an outside-crossing endpoint) keeps
+    # its base entry by fallback. If that entry contains an edge to a node that is
+    # consumed (or otherwise not present at new_layer), the bystander silently
+    # retains a stale edge to a node that no longer exists at this layer — the
+    # merge-neighbour double-recording defect (KB open_boundary_double_recording).
+    # validate() does not catch it because it skips edges to non-present
+    # endpoints, but the edge is real in the bystander's resolved entry and would
+    # surface on materialize/traversal. Fix: any roster node whose base-resolved
+    # incident set contains an edge to a non-present endpoint gets a rewritten
+    # entry at new_layer with those dead edges dropped (roster-present filtered).
+    bystanders: set = set()
+    already = survived | born | set(outside_new_crossings.keys())
+    for n in present:
+        if n in already:
+            continue
+        base_inc = {e for e in lg.edges_of(n, base_layer)
+                    if e.source == n or e.target == n}
+        if any((e.source not in present) or (e.target not in present)
+               for e in base_inc):
+            bystanders.add(n)
+
     # write sparse edge entries for born + changed (roster-present endpoints only)
     for n in (born | changed):
         incident = {e for e in result_incident.get(n, set())
@@ -572,6 +587,20 @@ def layer_apply_schema(lg, registry, base_layer, new_layer, operation):
         lg.set_edges(n, new_layer, incident)
         if n not in lg.nodes:
             lg.adopt_node(n)
+
+    # write trimmed entries for bystanders: their base incidence minus edges to
+    # non-present endpoints. This drops the stale edge to the consumed node while
+    # preserving every still-valid edge (agreement holds: the surviving partner
+    # keeps the same edge, since it too is roster-present and unchanged).
+    for n in bystanders:
+        base_inc = {e for e in lg.edges_of(n, base_layer)
+                    if e.source == n or e.target == n}
+        trimmed = {e for e in base_inc
+                   if e.source in present and e.target in present}
+        lg.set_edges(n, new_layer, trimmed)
+        if n not in lg.nodes:
+            lg.adopt_node(n)
+    changed = changed | bystanders
 
     # write the outside endpoints' fresh entries. set_edges overwrites, so the
     # entry must be COMPLETE: the union of (a) the new crossings built this fire
