@@ -143,6 +143,14 @@ def compile_core(graph2: PerspectiveGraph) -> SchemaCore:
     core.born = set(output_nodes) - set(inherit.keys())
     core.mapping_in = {o: set(s) for o, s in mapping_in.items()}
 
+    # Non-survivor fan-in sources: input nodes that mapped to an output but were
+    # not chosen as the identity inheritor (claimed_inputs excludes them, yet they
+    # are in mapped_inputs so they escaped core.delete above). They have no output
+    # correspondent and must be consumed — otherwise they persist as live orphans
+    # carrying pre-fire edges. (KB: compile_core_fanin_orphan)
+    non_survivor_fanin = mapped_inputs - claimed_inputs
+    core.delete |= non_survivor_fanin
+
     # --- internal edges (both endpoints output nodes) ---
     # A self-loop (src==tgt, both output nodes) IS an internal edge — e.g. a
     # structural self-loop encoding bit value 1 on a result leaf. Do NOT exclude
@@ -437,7 +445,7 @@ def provenance_from_schema(core: SchemaCore, binding: dict, output_map: dict):
             if in_node in core.delete:
                 continue  # consumed elsewhere; not a merge
             prov.add(source=binding[in_node], result=output_map[out_node],
-                     disposition=Disposition.MERGED)
+                     disposition=Disposition.INHERITED)
 
     # CONSUMED — delete-set inputs
     for in_node in core.delete:
