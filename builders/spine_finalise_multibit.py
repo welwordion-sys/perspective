@@ -21,7 +21,7 @@ Transformation:
 from basic_machinery.graph import PerspectiveGraph, Node, EdgeType, Edge
 from basic_machinery.operations import OperationDefinition
 from basic_machinery import encoding as E
-import scratch_add_init2 as S
+from basic_machinery import transition_helpers as S
 from boundary_decl import ph_all_four
 
 
