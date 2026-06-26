@@ -2,15 +2,12 @@
 
 Fires when both operands are exhausted to ZERO and there is NO carry.
 Matches: finished operator (ring+anchor) + buffer + two zero-spines each with a
-bit-0 leaf (value-matched zero) + result LSB spine (spine ONLY, not its leaf) +
-parent-port crossing (parent points operationally at the operator handle).
+bit-0 leaf (value-matched zero) + result LSB/MSB spine + its bit-1 leaf (value-
+matched one, structural self-loop) + parent-port crossing.
 
-Transformation: parent port -> result LSB spine. Everything else (operator ring,
-anchor, buffer, both zero-spines, both zero-leaves) is consumed. The result spine
-survives; its leaf rides along outside the match (result LSB bit is UNREAD).
-
-Result spine is a BOUNDARY node: its (OP,out) to its own leaf leaves the matched
-region, so it carries a placeholder crossing to balance its degree.
+Transformation: parent port -> result spine. Everything else consumed.
+The result spine and its leaf survive; the leaf is matched inside the window
+as a 1-bit (structural self-loop = value 1).
 """
 from basic_machinery.graph import PerspectiveGraph, Node, EdgeType, Edge
 from basic_machinery.operations import OperationDefinition
@@ -44,24 +41,23 @@ def build_finalise():
     p.add_edge(cyc[0], lz_spine, EdgeType.OPERATIONAL)
     p.add_edge(cyc[1], rz_spine, EdgeType.OPERATIONAL)
 
-    # result LSB spine (spine ONLY; its leaf is NOT in the pattern).
+    # result spine (LSB==MSB in the 1-bit case).
     r_spine = p.add_node(); labels[r_spine.id] = 'in_result_spine'
-    # result spine connects to operator via the buffer (add_init: rspine -S-> buffer)
     p.add_edge(r_spine, buffer, EdgeType.STRUCTURAL)
-    # At add_init's firing LSB==MSB (one result bit so far), so the LSB-readback
-    # anchor (OP, "I am the LSB, here's the MSB") and the MSB-growth anchor
-    # (S, "I am the MSB, here's where to grow") both point at the SAME buffer from
-    # the SAME node. Without this OP edge, r_spine's real degree (OP,out:2 — to
-    # buffer AND to its own leaf) doesn't match the pattern's (OP,out:1).
+    # LSB readback anchor — present in all finalise variants for consistency
+    # with the multibit case where it is structurally required.
     p.add_edge(r_spine, buffer, EdgeType.OPERATIONAL)
+    # MSB leaf matched inside the window as a 1-bit (structural self-loop = value 1).
+    r_leaf = p.add_node(); labels[r_leaf.id] = 'in_result_leaf(msb)'
+    p.add_edge(r_leaf, r_leaf, EdgeType.STRUCTURAL)   # bit value 1
+    p.add_edge(r_spine, r_leaf, EdgeType.OPERATIONAL)  # spine -> leaf
 
     # --- input side via typed crossings ---
     # boundary crossings:
     #   handle: parent points operationally at it -> (OPERATIONAL, in)
-    #   result spine: its (OP,out) to its own (unmatched) leaf -> (OPERATIONAL, out)
+    #   result spine: MSB leaf is now internal; only the (OP,in) from parent remains.
     specs = {
         handle:  [(EdgeType.OPERATIONAL, 'in')],
-        r_spine: [(EdgeType.OPERATIONAL, 'out')],
     }
     g2, nm, ph = S._typed_input_graph(p, specs)
 
@@ -94,10 +90,8 @@ def build_finalise():
     # (handle's real node merges into the result spine's real node); the merge
     # rewires handle's incoming parent operational edge onto the result spine.
     g2.add_edge(in_handle, out_rspine, EdgeType.OPERATIONAL)
-    # surviving result spine keeps its boundary placeholder in ALL FOUR cases so
-    # four-case-4c preserves every external crossing — crucially its OPERATIONAL
-    # external to its (unmatched) result-bit leaf, which struct-only declaration
-    # would drop (that was the dropped-result-bit bug).
+    # surviving result spine keeps all four boundary crossings — it still has
+    # external edges (e.g. the parent OP-in is preserved via the merge from handle).
     from boundary_decl import ph_all_four
     ph_all_four(g2, out_rspine, ph)
 

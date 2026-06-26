@@ -54,11 +54,16 @@ def build_finalise_multibit():
     r_msb = p.add_node(); labels[r_msb.id] = 'in_result_spine(msb)'
     p.add_edge(r_lsb, buffer, EdgeType.OPERATIONAL)   # lsb -OP-> buffer (readback)
     p.add_edge(r_msb, buffer, EdgeType.STRUCTURAL)    # msb -S-> buffer
+    # MSB leaf matched inside the window as a 1-bit (structural self-loop = value 1)
+    r_msb_leaf = p.add_node(); labels[r_msb_leaf.id] = 'in_result_leaf(msb)'
+    p.add_edge(r_msb_leaf, r_msb_leaf, EdgeType.STRUCTURAL)  # bit value 1
+    p.add_edge(r_msb, r_msb_leaf, EdgeType.OPERATIONAL)      # spine -> leaf
 
     specs = {
         handle: [(EdgeType.OPERATIONAL, 'in')],
         r_lsb:  [(EdgeType.OPERATIONAL, 'out'), (EdgeType.STRUCTURAL, 'out')],
-        r_msb:  [(EdgeType.OPERATIONAL, 'out'), (EdgeType.STRUCTURAL, 'in')],
+        r_msb:  [(EdgeType.STRUCTURAL, 'in')],
+        # r_msb: (OP,out) removed — MSB leaf is now internal
     }
     g2, nm, ph = S._typed_input_graph(p, specs)
 
