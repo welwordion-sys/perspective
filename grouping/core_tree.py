@@ -30,7 +30,7 @@ Delta data:
 from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
-from core_finder7 import find_core, _grow_from, _node_edges
+from core_finder import find_core, _grow_from, _node_edges
 
 Edge = tuple
 

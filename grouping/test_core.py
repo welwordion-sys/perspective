@@ -13,7 +13,7 @@ Gates:
 import sys
 sys.path.insert(0, '/tmp')
 
-from core_finder7 import find_core
+from core_finder import find_core
 from core_tree import build_tree, print_tree
 from delta_extractor import extract_delta
 from carriers import CARRIERS
