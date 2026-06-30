@@ -276,11 +276,17 @@ def match_cut_at_edge(
     graph: PerspectiveGraph,
     candidates: list[Node],
     view: MatchView | None = None,
+    seed_map: dict[Node, Node] | None = None,
 ) -> dict[Node, Node] | None:
     """
     Find a binding of the view's bind targets to real nodes in `candidates` such
     that (a) internal relations hold in the real graph and (b) each real node's
     TOTAL degree equals the bind target's derived expected degree.
+
+    seed_map: optional pre-established partial mapping (bind_target -> real_node).
+        Seeded nodes are accepted as-is and skipped in the search.
+        Allows dispatch to pass the accumulated core correspondence directly,
+        so backtracking only covers the delta nodes not yet matched.
 
     Returns one node_map (bind target -> real node) or None.
     """
@@ -294,13 +300,22 @@ def match_cut_at_edge(
     # equals the target's expected degree are viable.
     cand_for: dict[Node, list[Node]] = {}
     for t in targets:
+        if seed_map and t in seed_map:
+            cand_for[t] = [seed_map[t]]  # seed fixes this target
+            continue
         exp = view.expected_degree[t]
         cand_for[t] = [g for g in candidates
                        if real_total_degree(g, graph) == exp]
         if not cand_for[t]:
             return None
 
-    order = sorted(targets, key=lambda t: len(cand_for[t]))
+    # Seeded targets first (zero search cost), then unseen targets by candidate count
+    seeded = [t for t in targets if seed_map and t in seed_map]
+    unseeded = sorted(
+        [t for t in targets if not (seed_map and t in seed_map)],
+        key=lambda t: len(cand_for[t])
+    )
+    order = seeded + unseeded
 
     def consistent(t: Node, g: Node, mapping: dict, reverse: dict) -> bool:
         if g in reverse:
