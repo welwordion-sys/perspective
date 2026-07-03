@@ -33,18 +33,34 @@ def _grow_from(
     B_edges: list[Edge],
     seed_a: Any,
     seed_b: Any,
+    seed_map: dict[Any, Any] | None = None,
+    seed_map_r: dict[Any, Any] | None = None,
 ) -> tuple[set[Edge], dict[Any, Any]]:
     """
     Grow maximum lockstep subgraph from (seed_a, seed_b).
     Returns (matched_a_edges, node_map: a->b).
     No randomness — deterministic greedy growth.
+
+    seed_map/seed_map_r: an existing partial correspondence to extend rather
+    than replace. Used by find_core's multi-round loop so that a later round
+    (starting from a leftover node) can only CONFIRM or EXTEND nodes already
+    assigned by an earlier round, never reassign them to a different target —
+    which previously let two rounds silently disagree on where the same
+    A-node maps, with both rounds' edges then unioned into safe_core as if
+    they were one consistent embedding.
     """
     a_idx = _node_edges(A_edges)
     b_idx = _node_edges(B_edges)
     b_set = set(B_edges)
 
-    node_map: dict[Any, Any] = {seed_a: seed_b}
-    node_map_r: dict[Any, Any] = {seed_b: seed_a}
+    node_map: dict[Any, Any] = dict(seed_map) if seed_map else {}
+    node_map_r: dict[Any, Any] = dict(seed_map_r) if seed_map_r else {}
+    if seed_a in node_map and node_map[seed_a] != seed_b:
+        return set(), {}  # seed conflicts with existing assignment — invalid
+    if seed_b in node_map_r and node_map_r[seed_b] != seed_a:
+        return set(), {}
+    node_map[seed_a] = seed_b
+    node_map_r[seed_b] = seed_a
     matched: set[Edge] = set()
     frontier: list[Any] = [seed_a]
     visited_edges: set[Edge] = set()
@@ -157,6 +173,15 @@ def find_core(
     safe_core: set[Edge] = set()
     contested:  set[Edge] = set()
 
+    # Global correspondence accumulated across rounds. Passed into every
+    # _grow_from call so a later round starting from a leftover node can only
+    # CONFIRM or EXTEND nodes an earlier round already assigned — never give
+    # the same A-node a second, conflicting target. Without this, two rounds'
+    # edges get unioned into safe_core as if they were one consistent
+    # embedding when they are actually two incompatible partial mappings.
+    global_map: dict[Any, Any] = {}
+    global_map_r: dict[Any, Any] = {}
+
     while unmapped_a:
         best_matched: set[Edge] = set()
         best_map: dict = {}
@@ -165,7 +190,10 @@ def find_core(
         # Try each unmapped A-node against each unmapped B-node
         for a0 in list(unmapped_a):
             for b0 in list(unmapped_b):
-                matched, node_map = _grow_from(A_edges, B_edges, a0, b0)
+                matched, node_map = _grow_from(
+                    A_edges, B_edges, a0, b0,
+                    seed_map=global_map, seed_map_r=global_map_r,
+                )
                 # Only count edges where both endpoints are unmapped or newly mapped
                 valid = {e for e in matched
                          if node_map.get(e[0]) is not None
@@ -188,6 +216,10 @@ def find_core(
             # Remove mapped nodes from search
             unmapped_a -= set(best_map.keys())
             unmapped_b -= set(best_map.values())
+            # Fold this round's assignments into the global correspondence so
+            # subsequent rounds are constrained by them.
+            global_map.update(best_map)
+            global_map_r.update({v: k for k, v in best_map.items()})
         else:
             # Below threshold — mark as contested, stop
             contested |= best_matched

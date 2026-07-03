@@ -35,6 +35,7 @@ from dataclasses import dataclass, field
 from typing import Any
 from collections import defaultdict
 from core_finder import find_core, _grow_from, _node_edges
+from delta_extractor import extract_delta, DeltaEdge
 
 Edge = tuple  # (src, tgt, kind, type)
 Fingerprint = tuple  # (min_out_S, min_in_S, min_out_O, min_in_O, has_self_loop)
@@ -219,6 +220,12 @@ class CoreTree:
         # Each rule carries the full correspondence from root to its leaf node.
         # CoreNode IDs are the reference space — stable, path-independent.
         self._rule_map: dict[str, dict] = {}
+        # Anchored-delta cache: (id(node), rule_name) -> canonical frozenset.
+        # Invalidated implicitly per node identity — a node whose core_edges
+        # changes (shrink/lift) is a structurally different node going forward;
+        # stale entries keyed on its old id() simply stop being looked up since
+        # we always pass the live node object.
+        self._delta_cache: dict[tuple[int, str], frozenset] = {}
 
     # ------------------------------------------------------------------
     # Public API
@@ -237,25 +244,12 @@ class CoreTree:
             self._rule_map[name] = {}
             return
 
-        if len(self.root.members) == 1:
-            # Second rule — compute pairwise core, rebuild root
-            existing = next(iter(self.root.members))
-            core_edges, node_map = self._get_pairwise(existing, name)
-            new_root = _make_node(core_edges)
-            new_root.children.append(existing)
-            new_root.children.append(name)
-            self.root = new_root
-            # Update delta info for both rules
-            # node_map: existing->name space
-            # existing's map: core_node -> existing_rule_node (keys)
-            # name's map: core_node -> name_rule_node (values)
-            self._rule_map[existing] = {k: k for k in node_map.keys()}
-            self._rule_map[name] = {k: v for k, v in node_map.items()}
-            self._update_delta_info(existing, self._rule_edges[existing])
-            self._update_delta_info(name, edges)
-            return
-
-        # General case: walk tree to find insertion point
+        # General case: walk tree to find insertion point (also handles the
+        # second rule — root already exists as a 1-leaf node with core = the
+        # first rule's FULL edges, so this naturally shrinks root via a
+        # size-asymmetric subgraph-embedding test rather than jumping straight
+        # to a same-size pairwise core, which risks a spurious total-graph
+        # isomorphism on structurally symmetric rule families).
         placed = self._insert_into(self.root, name, edges)
         if not placed:
             # Fingerprint excluded everywhere — add as leaf at root with empty map
@@ -362,6 +356,133 @@ class CoreTree:
     # ------------------------------------------------------------------
     # Pairwise cache
     # ------------------------------------------------------------------
+
+    # ------------------------------------------------------------------
+    # Anchored delta (fragment identity)
+    # ------------------------------------------------------------------
+    #
+    # Raw pairwise find_core(rule_A, rule_B) finds the BEST matching subgraph
+    # under ANY valid node correspondence between A and B. Two rules carrying
+    # structurally distinct, unrelated deltas can still score a spuriously
+    # large pairwise core if an alternate (symmetric/coincidental) correspondence
+    # happens to align that many edges — e.g. a "left operand" delta and a
+    # "right operand" delta can align under a left<->right relabeling even
+    # though they are not the same fragment. This is what causes order-
+    # dependent / incorrect fusion: comparing rules directly to each other.
+    #
+    # Fix: never compare two rules to each other. Compare both to the SAME
+    # third thing — this node's own core_edges — and compare the resulting
+    # deltas as canonical, ID-agnostic DeltaEdge sets. Two rules that
+    # genuinely carry the same fragment get IDENTICAL canonical deltas;
+    # rules with different fragments do not coincide, regardless of any
+    # alternate correspondence that might align them pairwise.
+
+    def _anchored_delta(self, node: "CoreNode", name: str) -> frozenset:
+        """
+        Canonical delta of rule `name` beyond node.core_edges, expressed as a
+        frozenset of normalized (src_label, src_is_delta, tgt_label, tgt_is_delta,
+        kind, typ) tuples. Delta-local node ids are renumbered deterministically
+        so that two rules introducing structurally-equivalent new nodes compare
+        equal regardless of extraction order. Cached per (node, name).
+        """
+        key = (id(node), len(node.core_edges), name)
+        cached = self._delta_cache.get(key)
+        if cached is not None:
+            return cached
+
+        edges = self._rule_edges[name]
+        r = find_core(list(node.core_edges), edges)
+        core_edges = r['safe_core']
+        node_map = r['subgraphs'][0][1] if r['subgraphs'] else {}
+        delta = extract_delta(core_edges, node_map, edges)
+        canon = self._canonicalize_delta(delta)
+        self._delta_cache[key] = canon
+        return canon
+
+    @staticmethod
+    def _canonicalize_delta(delta) -> frozenset:
+        """
+        Renumber delta-local node ids deterministically (sorted by their
+        attachment-edge signature) and return a frozenset of plain tuples —
+        comparable across independently-extracted Delta objects.
+        """
+        def attach_key(item):
+            did, e = item
+            return (e.src_is_delta, str(e.src_label), e.tgt_is_delta,
+                    str(e.tgt_label), e.kind, str(e.typ))
+
+        ordered = sorted(delta.new_nodes, key=attach_key)
+        remap = {old_did: new_id for new_id, (old_did, _) in enumerate(ordered)}
+
+        def relabel(label, is_delta):
+            return remap[label] if is_delta else label
+
+        out = set()
+        for old_did, e in ordered:
+            out.add((relabel(e.src_label, e.src_is_delta), e.src_is_delta,
+                      relabel(e.tgt_label, e.tgt_is_delta), e.tgt_is_delta,
+                      e.kind, e.typ))
+        for e in delta.new_edges:
+            out.add((relabel(e.src_label, e.src_is_delta), e.src_is_delta,
+                      relabel(e.tgt_label, e.tgt_is_delta), e.tgt_is_delta,
+                      e.kind, e.typ))
+        return frozenset(out)
+
+    def _anchored_delta_for_edges(self, outer_node: "CoreNode", edges: set, edges_id) -> frozenset:
+        """
+        Like _anchored_delta, but for an arbitrary edge-set rather than a stored
+        rule (used to compare a CHILD's own core_edges against its parent's core —
+        not a deep member's full edges, which could carry fragments the child's
+        core itself doesn't require).
+        """
+        key = (id(outer_node), len(outer_node.core_edges), edges_id, len(edges))
+        cached = self._delta_cache.get(key)
+        if cached is not None:
+            return cached
+
+        edges_list = list(edges)
+        r = find_core(list(outer_node.core_edges), edges_list)
+        core_edges = r['safe_core']
+        node_map = r['subgraphs'][0][1] if r['subgraphs'] else {}
+        delta = extract_delta(core_edges, node_map, edges_list)
+        canon = self._canonicalize_delta(delta)
+        self._delta_cache[key] = canon
+        return canon
+
+    @staticmethod
+    def _materialize_fragment_core(node: "CoreNode", frag: frozenset) -> set:
+        """
+        Translate a canonical delta fragment (frozenset of normalized tuples)
+        back into a real edge-set in node.core_edges' own template space,
+        allocating fresh symbolic ids for the fragment's delta-local nodes.
+        The matcher is structural/id-agnostic, so these ids only need to be
+        internally consistent — not meaningful in any other space.
+        """
+        existing_ids = set()
+        for (s, t, _k, _ty) in node.core_edges:
+            existing_ids.add(s)
+            existing_ids.add(t)
+        next_id = (max(existing_ids) + 1) if existing_ids else 0
+
+        delta_id_map: dict = {}
+        new_edges = set(node.core_edges)
+        for (src_label, src_is_delta, tgt_label, tgt_is_delta, kind, typ) in frag:
+            if src_is_delta:
+                if src_label not in delta_id_map:
+                    delta_id_map[src_label] = next_id
+                    next_id += 1
+                s = delta_id_map[src_label]
+            else:
+                s = src_label
+            if tgt_is_delta:
+                if tgt_label not in delta_id_map:
+                    delta_id_map[tgt_label] = next_id
+                    next_id += 1
+                t = delta_id_map[tgt_label]
+            else:
+                t = tgt_label
+            new_edges.add((s, t, kind, typ))
+        return new_edges
 
     def _get_pairwise(
         self,
@@ -548,53 +669,57 @@ class CoreTree:
 
         # CASE 1 (no shrink): `name` has everything this node requires.
         # Try to place deeper first (most-specific subgroup wins) — but only into
-        # children whose ENTIRE core `name` contains. Descending into a child whose
-        # core `name` only partially shares would shrink that committed subgroup,
-        # which is wrong: `name` then belongs as a sibling at THIS node, not inside
-        # the subgroup. We test coverage cheaply via the pairwise core of `name`
-        # against a child representative meeting the child's full core size.
+        # children whose ENTIRE core `name` contains. Coverage is tested by
+        # comparing both `name` and the child's representative to THIS node's
+        # core (anchored delta), never to each other directly — a direct
+        # pairwise comparison can find a spuriously large match under an
+        # unrelated alternate correspondence (e.g. a left-operand delta
+        # aligning with a right-operand delta under relabeling). `name` covers
+        # the child iff the representative's anchored delta is a SUBSET of
+        # name's anchored delta (the child's extra structure is fully present
+        # in name).
+        delta_name = self._anchored_delta(node, name)
         for child in node.children:
             if isinstance(child, CoreNode):
-                rep = next(iter(child.members))
-                cov_core, _ = self._get_pairwise(name, rep)
-                if len(cov_core) < len(child.core_edges):
+                delta_child = self._anchored_delta_for_edges(
+                    node, child.core_edges, id(child))
+                if not delta_child <= delta_name:
                     continue  # `name` does not cover this subgroup's core — skip
                 if self._insert_into(child, name, edges,
                                      parent_map=node_map,
                                      accumulated_map=accumulated_map):
                     return True
 
-        # Could not descend — place here. Fusion: if `name` shares strictly more
-        # than this node's core with one or more existing leaves, pull them and
-        # `name` into a new child carrying that larger shared core.
+        # Could not descend — place here. Fusion: group existing leaves by their
+        # EXACT anchored delta (their true fragment identity relative to this
+        # node). A leaf qualifies to fuse with `name` only on EXACT equality —
+        # not "shares more than node core" by raw size, which previously
+        # conflated structurally-distinct same-size fragments (e.g. a left-
+        # operand delta and a right-operand delta can score the same pairwise
+        # size under an unrelated correspondence). Exact equality is what
+        # correctly partitions e.g. left-only vs right-only deltas into
+        # separate subgroups instead of merging them.
         leaf_members = [c for c in node.children if isinstance(c, str)]
-        best_subset_core: set[Edge] | None = None
-        best_subset: list = []
 
-        for leaf in leaf_members:
-            # Transitivity bounds only the A-mediated (triple) core; fusion is about
-            # PRIVATE structure beyond this node's core, which the intermediary does
-            # not carry. So transitivity is used only as a warm seed here, never as
-            # an exclusion (its sound use stays in _match_against_core).
-            _, warm_map = self._transitivity_bound(name, leaf)
-            leaf_core, _ = self._get_pairwise(name, leaf, warm_map)
-            if len(leaf_core) > len(node.core_edges):
-                if best_subset_core is None or len(leaf_core) > len(best_subset_core):
-                    best_subset_core = leaf_core
-                    best_subset = [leaf]
-                elif len(leaf_core) == len(best_subset_core):
-                    best_subset.append(leaf)
+        if delta_name:  # only attempt fusion when name actually has extra structure
+            matching_leaves = [
+                leaf for leaf in leaf_members
+                if self._anchored_delta(node, leaf) == delta_name
+            ]
+        else:
+            matching_leaves = []
 
         self._rule_map[name] = dict(accumulated_map)
 
-        if best_subset_core is not None:
-            sub_node = _make_node(best_subset_core, parent=node)
-            sub_node.children.extend(best_subset)
+        if matching_leaves:
+            sub_core = self._materialize_fragment_core(node, delta_name)
+            sub_node = _make_node(sub_core, parent=node)
+            sub_node.children.extend(matching_leaves)
             sub_node.children.append(name)
-            for leaf in best_subset:
+            for leaf in matching_leaves:
                 node.children.remove(leaf)
             node.children.append(sub_node)
-            self._propagate_discovery(node, sub_node, best_subset_core)
+            self._propagate_discovery(node, sub_node, sub_core)
         else:
             node.children.append(name)
 
