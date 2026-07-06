@@ -41,23 +41,21 @@ def build_finalise():
     p.add_edge(cyc[0], lz_spine, EdgeType.OPERATIONAL)
     p.add_edge(cyc[1], rz_spine, EdgeType.OPERATIONAL)
 
-    # result spine (LSB==MSB in the 1-bit case).
+    # result LSB spine (spine ONLY; its leaf is NOT in the pattern — LSB bit UNREAD).
     r_spine = p.add_node(); labels[r_spine.id] = 'in_result_spine'
     p.add_edge(r_spine, buffer, EdgeType.STRUCTURAL)
-    # LSB readback anchor — present in all finalise variants for consistency
-    # with the multibit case where it is structurally required.
+    # LSB==MSB coincident at finalise: LSB-readback (OP) and MSB-growth (S) both
+    # point at the same buffer. Without this OP edge r_spine's (OP,out:2 — buffer
+    # AND its own leaf) would not match the pattern's (OP,out:1).
     p.add_edge(r_spine, buffer, EdgeType.OPERATIONAL)
-    # MSB leaf matched inside the window as a 1-bit (structural self-loop = value 1).
-    r_leaf = p.add_node(); labels[r_leaf.id] = 'in_result_leaf(msb)'
-    p.add_edge(r_leaf, r_leaf, EdgeType.STRUCTURAL)   # bit value 1
-    p.add_edge(r_spine, r_leaf, EdgeType.OPERATIONAL)  # spine -> leaf
 
     # --- input side via typed crossings ---
     # boundary crossings:
     #   handle: parent points operationally at it -> (OPERATIONAL, in)
-    #   result spine: MSB leaf is now internal; only the (OP,in) from parent remains.
+    #   result spine: its (OP,out) to its own (unmatched) leaf -> (OPERATIONAL, out)
     specs = {
         handle:  [(EdgeType.OPERATIONAL, 'in')],
+        r_spine: [(EdgeType.OPERATIONAL, 'out')],
     }
     g2, nm, ph = S._typed_input_graph(p, specs)
 
