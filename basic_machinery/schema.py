@@ -655,3 +655,406 @@ def layer_apply_schema(lg, registry, base_layer, new_layer, operation):
         'layer_key': new_layer, 'provenance': prov,
         'born': born, 'consumed': consumed, 'changed': changed,
     }
+
+
+# ===========================================================================
+# COMPOUND MATCH RESOLUTION — detection (collect step 2 of 2; step 1 is
+# collecting the raw match list itself via match_all/find_all_cores).
+#
+# Per the ERS-committed decision (decision_schema_reuse): precompiled per-rule
+# SchemaCore/EditsArtifact/FragmentArtifact are REUSED unmodified here. This
+# function authors no new graph2 -- it only reads, via the existing
+# _read_boundary_externals, which real nodes a match's boundary crossings
+# touch, and cross-references that against every other match's own matched
+# region (binding.values()). Nothing is torn down; base_graph is read-only.
+# ===========================================================================
+
+def detect_overlaps(matches: list, base_graph: PerspectiveGraph) -> dict:
+    """
+    Given the full collected match list for a firing pass, find every real
+    node touched by more than one match, classified into the two cases the
+    Compound Match Resolution framework distinguishes:
+
+      overlapping_nodes  : a real node that is itself matched (as an input)
+                            by two or more matches' own regions.
+      boundary_crossings : a real node that one match (i) reads as a live
+                            boundary-crossing target, while another match (j)
+                            has that SAME node inside its own matched region
+                            (the boundary_of_one_inside_other case) -- keyed
+                            (i, j) -> set of such nodes.
+
+    matches   : list of (operation, binding). operation carries .schema
+                (Schema: core/edits/fragment); binding: schema input Node ->
+                real Node, from match_all/match_cut_at_edge.
+    base_graph: the graph this pass fires against, materialized once,
+                read-only (detection never mutates or tears down).
+
+    Returns a dict with region_of, boundary_touches, overlapping_nodes,
+    boundary_crossings, and degree (real_node -> count of distinct matches
+    touching it via region OR boundary) -- degree is what step 2 (resolution)
+    ranks on to decide which overlap to resolve first.
+    """
+    region_of: dict = {}
+    for i, (_, binding) in enumerate(matches):
+        for real in set(binding.values()):
+            region_of.setdefault(real, set()).add(i)
+
+    externals: dict = {}
+    boundary_touches: dict = {}
+    for i, (operation, binding) in enumerate(matches):
+        edits = operation.schema.edits
+        ext = _read_boundary_externals(edits, binding, base_graph)
+        externals[i] = ext
+        boundary_touches[i] = {
+            outside for crossings in ext.values()
+            for (_et, _direction, outside) in crossings
+        }
+
+    overlapping_nodes = {n: set(idxs) for n, idxs in region_of.items()
+                          if len(idxs) > 1}
+
+    boundary_crossings: dict = {}
+    for i, touched in boundary_touches.items():
+        for n in touched:
+            owners = region_of.get(n, set()) - {i}
+            for j in owners:
+                boundary_crossings.setdefault((i, j), set()).add(n)
+
+    degree: dict = {n: set(idxs) for n, idxs in region_of.items()}
+    for i, touched in boundary_touches.items():
+        for n in touched:
+            degree.setdefault(n, set()).add(i)
+    degree = {n: len(idxs) for n, idxs in degree.items()}
+
+    return {
+        "region_of": region_of,
+        "boundary_touches": boundary_touches,
+        "externals": externals,
+        "overlapping_nodes": overlapping_nodes,
+        "boundary_crossings": boundary_crossings,
+        "degree": degree,
+    }
+
+
+def resolve_compound(matches: list, overlap_info: dict) -> dict:
+    """
+    Compound Match Resolution step 2: rank the overlaps detect_overlaps found
+    by degree (highest first) and resolve each.
+
+      overlapping_nodes case: two+ matches claim the same real node as their
+      own input. One match keeps inherit rights (deterministic: lowest match
+      index -- the ranking only affects processing order here since each
+      node's resolution doesn't currently depend on another node's outcome;
+      see the carried limitation below). Every other match on that node is
+      forced to mint a fresh (born) identity for its own output instead of
+      inheriting -- this is a per-firing override, the underlying compiled
+      EditsArtifact.inherit is untouched.
+
+      boundary_crossings case: match i's crossing reads real node n live, but
+      n is inside match j's own region. i's crossing must be redirected to
+      resolve through j's eventual output identity for n at apply time (via
+      j's own output_map, computed the normal way -- see decision_schema_reuse)
+      instead of n's stale pre-fire identity.
+
+    Carried limitation: resolution of one overlap node is currently
+    independent of another's outcome. The framework's cascade ("resolved
+    outputs become stable anchors for remaining matches") is not exercised
+    here because neither test scenario had one match's own region overlap
+    with two DIFFERENT other matches' resolved nodes simultaneously -- true
+    transitive cascade (chained overlaps) is unverified past 2 matches.
+
+    Returns:
+      forced_born    : match_index -> set of that match's own schema INPUT
+                        nodes whose output must mint fresh instead of inherit.
+      redirects      : (i, out_node_i) -> owner match index j.
+      resolved_owner : real_node -> winning/owning match index.
+    """
+    ranked_nodes = sorted(
+        set(overlap_info["overlapping_nodes"])
+        | {n for nodes in overlap_info["boundary_crossings"].values() for n in nodes},
+        key=lambda n: -overlap_info["degree"][n],
+    )
+
+    forced_born: dict = {}
+    resolved_owner: dict = {}
+
+    for n in ranked_nodes:
+        if n in overlap_info["overlapping_nodes"]:
+            idxs = sorted(overlap_info["overlapping_nodes"][n])
+            winner = idxs[0]
+            resolved_owner[n] = winner
+            for loser in idxs[1:]:
+                _op, binding = matches[loser]
+                in_node = next(k for k, v in binding.items() if v == n)
+                forced_born.setdefault(loser, set()).add(in_node)
+
+    redirects: dict = {}
+    for (i, j), nodes in overlap_info["boundary_crossings"].items():
+        for n in nodes:
+            owner = resolved_owner.get(n, j)
+            for out_node, crossings in overlap_info["externals"][i].items():
+                if any(outside == n for (_et, _direction, outside) in crossings):
+                    redirects[(i, out_node)] = owner
+
+    return {
+        "forced_born": forced_born,
+        "redirects": redirects,
+        "resolved_owner": resolved_owner,
+    }
+
+
+# ===========================================================================
+# COMPOUND MATCH RESOLUTION — orchestrator (apply). Per decision_schema_reuse,
+# every per-rule SchemaCore/EditsArtifact is reused unmodified; this function
+# is the new apply-time layer that fires ALL matches in one pass as a single
+# combined write, using detect_overlaps + resolve_compound's decisions.
+# Per decision_orchestrator_order: resolution order is a topological sort of
+# the redirect dependency graph (owner before crosser); a redirect cycle
+# raises rather than guessing. A redirect whose owner has no surviving
+# inherit claim on the shared node is dropped, not reattached to the stale
+# pre-fire identity.
+# ===========================================================================
+
+def _compound_provenance(operation, binding: dict, output_map: dict, forced_inputs: set):
+    """Like provenance_from_schema, but any inherit input in `forced_inputs`
+    (this firing's forced-born override) is recorded as BORN, not MAPPED --
+    its fresh identity has no source; the original real id's provenance
+    continues through whichever match actually won it."""
+    from basic_machinery.layers import Provenance, Disposition
+    core = operation.schema.core
+    prov = Provenance()
+
+    for out_node, in_node in core.inherit.items():
+        if in_node in forced_inputs:
+            prov.add(source=None, result=output_map[out_node], disposition=Disposition.BORN)
+        else:
+            prov.add(source=binding[in_node], result=output_map[out_node],
+                     disposition=Disposition.MAPPED)
+
+    for out_node, srcs in core.mapping_in.items():
+        identity_src = core.inherit.get(out_node)
+        for in_node in srcs:
+            if in_node is identity_src:
+                continue
+            if in_node in core.delete:
+                continue
+            prov.add(source=binding[in_node], result=output_map[out_node],
+                     disposition=Disposition.INHERITED)
+
+    for in_node in core.delete:
+        prov.add(source=binding[in_node], result=None, disposition=Disposition.CONSUMED)
+
+    for out_node in core.born:
+        prov.add(source=None, result=output_map[out_node], disposition=Disposition.BORN)
+
+    return prov
+
+
+def apply_compound(lg, registry, base_layer, new_layer, matches: list) -> dict:
+    """Fire every match in `matches` together as ONE combined firing pass,
+    writing a single new_layer. Generalizes layer_apply_schema across the
+    whole firing set instead of one operation.
+
+    matches: list of (operation, binding) already collected for this pass
+             (e.g. via match_all/find_all_cores per rule). Every operation
+             must carry a compiled .schema.
+    """
+    from basic_machinery.layers import LayerRecord, TravelType, Provenance
+
+    base = lg.materialize(base_layer)
+    base_nodes = set(base.nodes)
+
+    overlap_info = detect_overlaps(matches, base)
+    resolution = resolve_compound(matches, overlap_info)
+    forced_born = resolution["forced_born"]
+    redirects = resolution["redirects"]
+
+    # ---- resolution order: topo sort of the owner-dependency graph ----
+    n = len(matches)
+    deps = {i: set() for i in range(n)}
+    for (i, _out_node), owner in redirects.items():
+        if owner != i:
+            deps[i].add(owner)
+
+    order: list = []
+    temp_mark, perm_mark = set(), set()
+
+    def visit(k):
+        if k in perm_mark:
+            return
+        if k in temp_mark:
+            raise ValueError(f"compound redirect cycle detected involving match {k}")
+        temp_mark.add(k)
+        for d in deps[k]:
+            visit(d)
+        temp_mark.discard(k)
+        perm_mark.add(k)
+        order.append(k)
+
+    for k in range(n):
+        visit(k)
+
+    # ---- per-match output_map, honoring forced_born ----
+    used_ids = {node.id for node in base_nodes}
+    next_id = (max(used_ids) + 1) if used_ids else 0
+    output_maps: dict = {}
+    for i in order:
+        operation, binding = matches[i]
+        core = operation.schema.core
+        overridden = forced_born.get(i, set())
+        om = {}
+        for out_node, in_node in core.inherit.items():
+            if in_node in overridden:
+                om[out_node] = Node(id=next_id); next_id += 1
+            else:
+                om[out_node] = binding[in_node]
+        for out_node in core.born:
+            om[out_node] = Node(id=next_id); next_id += 1
+        output_maps[i] = om
+
+    # ---- dispositions across the whole firing set ----
+    consumed: set = set()
+    born: set = set()
+    survived: set = set()
+    for i, (operation, binding) in enumerate(matches):
+        core = operation.schema.core
+        om = output_maps[i]
+        overridden = forced_born.get(i, set())
+        for in_node in core.delete:
+            consumed.add(binding[in_node])
+        for out_node in core.born:
+            born.add(om[out_node])
+        for out_node, in_node in core.inherit.items():
+            if in_node in overridden:
+                born.add(om[out_node])
+            else:
+                survived.add(om[out_node])
+
+    result_incident: dict = {node: set() for node in (survived | born)}
+
+    def _add(src, tgt, et):
+        e = Edge(src, tgt, et)
+        if src in result_incident: result_incident[src].add(e)
+        if tgt in result_incident: result_incident[tgt].add(e)
+
+    for i, (operation, _binding) in enumerate(matches):
+        core = operation.schema.core
+        om = output_maps[i]
+        for (s, t, et) in core.internal_edges:
+            rs, rt = om.get(s), om.get(t)
+            if rs is not None and rt is not None:
+                _add(rs, rt, et)
+
+    # boundary crossings, resolving redirects through the owner's output_map
+    outside_new_crossings: dict = {}
+    for i, (operation, _binding) in enumerate(matches):
+        om = output_maps[i]
+        saved_externals = overlap_info["externals"][i]
+        for out_node, crossings in saved_externals.items():
+            r = om.get(out_node)
+            if r is None:
+                continue
+            for (et, direction, outside) in crossings:
+                target = outside
+                if (i, out_node) in redirects:
+                    owner = redirects[(i, out_node)]
+                    owner_op, owner_binding = matches[owner]
+                    owner_core = owner_op.schema.core
+                    owner_in = next((k for k, v in owner_binding.items() if v == outside), None)
+                    if owner_in is None:
+                        continue  # fail safe: no known owner input, drop
+                    # owner_in is either the inherit source of exactly one output
+                    # (survives with that identity) or in owner_core.delete (gone
+                    # -- this holds even if owner_in also appears in some
+                    # mapping_in[out] as a non-identity fan-in input: compile_core
+                    # puts every non-identity fan-in loser into core.delete too,
+                    # confirmed by construction -- inherit-values and delete
+                    # exhaustively partition all inputs with no third "merged but
+                    # alive elsewhere" state. Checking mapping_in as a fallback
+                    # here would incorrectly resurrect a genuinely-deleted input.
+                    owner_out = next(
+                        (o for o, inp in owner_core.inherit.items() if inp == owner_in),
+                        None)
+                    if owner_out is None:
+                        continue  # owner consumed it (in core.delete): drop
+                    target = output_maps[owner][owner_out]
+                if target not in base_nodes and target not in born and target not in survived:
+                    continue
+                e = Edge(r, target, et) if direction == 'out' else Edge(target, r, et)
+                if direction == 'out': _add(r, target, et)
+                else:                  _add(target, r, et)
+                outside_new_crossings.setdefault(target, set()).add(e)
+
+    child_roster = lg.derive_roster(parent=base_layer, consumed=consumed, born=born)
+    child_roster = set(child_roster) | set(outside_new_crossings.keys())
+    lg.set_roster(new_layer, child_roster)
+    present = set(child_roster)
+
+    base_incident = {node: {e for e in base.edges if e.source == node or e.target == node}
+                      for node in survived}
+    changed = {node for node in survived
+               if base_incident.get(node, set()) !=
+                  {e for e in result_incident.get(node, set())
+                   if e.source in present and e.target in present}}
+
+    bystanders: set = set()
+    already = survived | born | set(outside_new_crossings.keys())
+    for node in present:
+        if node in already:
+            continue
+        base_inc = {e for e in lg.edges_of(node, base_layer)
+                    if e.source == node or e.target == node}
+        if any((e.source not in present) or (e.target not in present) for e in base_inc):
+            bystanders.add(node)
+
+    for node in (born | changed):
+        incident = {e for e in result_incident.get(node, set())
+                    if e.source in present and e.target in present}
+        lg.set_edges(node, new_layer, incident)
+        if node not in lg.nodes:
+            lg.adopt_node(node)
+
+    for node in bystanders:
+        base_inc = {e for e in lg.edges_of(node, base_layer)
+                    if e.source == node or e.target == node}
+        trimmed = {e for e in base_inc if e.source in present and e.target in present}
+        lg.set_edges(node, new_layer, trimmed)
+        if node not in lg.nodes:
+            lg.adopt_node(node)
+    changed = changed | bystanders
+
+    for outside, new_edges in outside_new_crossings.items():
+        base_edges = {e for e in lg.edges_of(outside, base_layer)
+                      if e.source == outside or e.target == outside}
+        surviving_old = set()
+        for e in base_edges:
+            other = e.target if e.source == outside else e.source
+            if other == outside:
+                surviving_old.add(e); continue
+            if other in consumed:
+                continue
+            if e in lg.edges_of(other, new_layer):
+                surviving_old.add(e)
+        entry = {e for e in (surviving_old | new_edges)
+                 if e.source in present and e.target in present}
+        lg.set_edges(outside, new_layer, entry)
+        if outside not in lg.nodes:
+            lg.adopt_node(outside)
+
+    prov = Provenance()
+    for i, (operation, binding) in enumerate(matches):
+        piece = _compound_provenance(operation, binding, output_maps[i], forced_born.get(i, set()))
+        prov.entries.extend(piece.entries)
+
+    registry.add(LayerRecord(
+        key=new_layer, travel_type=TravelType.UPWARD,
+        ruleset=frozenset({operation.name for operation, _ in matches}),
+        provenance=prov,
+        parents=(base_layer,),
+    ))
+
+    return {
+        'layer_key': new_layer, 'provenance': prov,
+        'born': born, 'consumed': consumed, 'changed': changed,
+        'output_maps': output_maps,
+    }

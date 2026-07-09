@@ -384,3 +384,107 @@ def match_cut_at_edge(
     if backtrack(0, {}, {}):
         return result
     return None
+
+
+# ---------------------------------------------------------------------------
+# Collect-all-matches — the input to Compound Match Resolution's preprocess
+# step. Same search as match_cut_at_edge (shares its two acceptance tests:
+# consistent() for internal relations, crossing_ok() for the crossing-degree
+# split) but does not stop at the first full binding — it keeps backtracking
+# and records every distinct one. Needed because compound resolution must see
+# ALL of a rule's matches (and every other rule's) before deciding which
+# overlap first, not just whichever one match_cut_at_edge happened to find.
+# ---------------------------------------------------------------------------
+
+def match_all(
+    input_graph: PerspectiveGraph,
+    graph: PerspectiveGraph,
+    candidates: list[Node],
+    view: MatchView | None = None,
+    seed_map: dict[Node, Node] | None = None,
+) -> list[dict[Node, Node]]:
+    """
+    Find EVERY binding of the view's bind targets to real nodes in `candidates`
+    satisfying the same two conditions as match_cut_at_edge: internal relations
+    hold, and each real node's total/crossing degree matches the bind target's
+    derived expectation. Returns a list of full bindings (possibly empty); two
+    bindings differing in even one target->real pair count as distinct.
+    """
+    if view is None:
+        view = derive_match_view(input_graph)
+
+    targets = list(view.bind_targets)
+    rel = _input_relations(input_graph, view)
+
+    cand_for: dict[Node, list[Node]] = {}
+    for t in targets:
+        if seed_map and t in seed_map:
+            cand_for[t] = [seed_map[t]]
+            continue
+        exp = view.expected_degree[t]
+        cand_for[t] = [g for g in candidates
+                       if real_total_degree(g, graph) == exp]
+        if not cand_for[t]:
+            return []
+
+    seeded = [t for t in targets if seed_map and t in seed_map]
+    unseeded = sorted(
+        [t for t in targets if not (seed_map and t in seed_map)],
+        key=lambda t: len(cand_for[t])
+    )
+    order = seeded + unseeded
+
+    def consistent(t: Node, g: Node, mapping: dict, reverse: dict) -> bool:
+        if g in reverse:
+            return False
+        for (t_nbr, etype) in rel[t]:
+            if t_nbr in mapping:
+                if Edge(g, mapping[t_nbr], etype) not in graph:
+                    return False
+        for src, lst in rel.items():
+            if src in mapping:
+                for (t_nbr, etype) in lst:
+                    if t_nbr == t:
+                        if Edge(mapping[src], g, etype) not in graph:
+                            return False
+        return True
+
+    def crossing_ok(mapping: dict) -> bool:
+        region = set(mapping.values())
+        for t, g in mapping.items():
+            exp_cross = view.expected_crossing.get(t, {})
+            real_cross: dict[DegreeKey, int] = {}
+            for e in graph.edges_from(g):
+                if e.source == e.target:
+                    continue
+                if e.target not in region:
+                    k = (e.edge_type, 'out')
+                    real_cross[k] = real_cross.get(k, 0) + 1
+            for e in graph.edges_to(g):
+                if e.source == e.target:
+                    continue
+                if e.source not in region:
+                    k = (e.edge_type, 'in')
+                    real_cross[k] = real_cross.get(k, 0) + 1
+            if real_cross != exp_cross:
+                return False
+        return True
+
+    results: list[dict[Node, Node]] = []
+
+    def backtrack(depth: int, mapping: dict, reverse: dict) -> None:
+        if depth == len(order):
+            if crossing_ok(mapping):
+                results.append(dict(mapping))
+            return
+        t = order[depth]
+        for g in cand_for[t]:
+            if consistent(t, g, mapping, reverse):
+                mapping[t] = g
+                reverse[g] = t
+                backtrack(depth + 1, mapping, reverse)
+                del mapping[t]
+                del reverse[g]
+
+    backtrack(0, {}, {})
+    return results

@@ -235,3 +235,53 @@ def find_core(
         subgraphs=subgraphs,
         ratio=ratio,
     )
+
+
+def find_all_cores(
+    A_edges: list[Edge],
+    B_edges: list[Edge],
+    min_ratio: float = 0.3,
+) -> list[tuple[set[Edge], dict[Any, Any]]]:
+    """
+    Enumerate EVERY embedding of A into B at/above min_ratio, including
+    overlapping ones. This is the collect-all-matches counterpart to
+    find_core's single best-effort embedding — find_core and dispatch.py are
+    UNTOUCHED and keep their existing verified single-winner contract; this is
+    a separate sibling driver over the same _grow_from primitive.
+
+    Unlike find_core: no progressive node elimination, no global accumulated
+    correspondence across attempts. Every (a0, b0) seed pair is tried fresh
+    and independently, so two accepted embeddings may legitimately share A-
+    or B-nodes — that overlap is exactly what Compound Match Resolution needs
+    to see, not something to suppress.
+
+    Returns a list of (matched_edges, node_map), deduplicated by node_map
+    (the same correspondence reached from different seeds counts once).
+    """
+    A_nodes = list({n for e in A_edges for n in (e[0], e[1])})
+    B_nodes = list({n for e in B_edges for n in (e[0], e[1])})
+    total_a = len(A_nodes)
+
+    seen_maps: set = set()
+    results: list[tuple[set[Edge], dict[Any, Any]]] = []
+
+    for a0 in A_nodes:
+        for b0 in B_nodes:
+            matched, node_map = _grow_from(A_edges, B_edges, a0, b0)
+            if not node_map:
+                continue
+            valid = {e for e in matched
+                     if node_map.get(e[0]) is not None
+                     and node_map.get(e[1]) is not None}
+            if not valid:
+                continue
+            ratio = len(node_map) / total_a if total_a else 0
+            if ratio < min_ratio:
+                continue
+            key = tuple(sorted(node_map.items()))
+            if key in seen_maps:
+                continue
+            seen_maps.add(key)
+            results.append((valid, node_map))
+
+    return results
