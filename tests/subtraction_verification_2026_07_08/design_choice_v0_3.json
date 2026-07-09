@@ -1,0 +1,489 @@
+{
+  "goals": {
+    "g1": "Which subtraction design (current 4-phase, translated Arm A, translated Arm B, or a hybrid) should Perspective adopt for the negative-path subtraction, given its actual architecture constraints (independent per-operand spines, two reserved EdgeTypes, 0-n terminal frame)?"
+  },
+  "claims": {
+    "s_arch_spines": {
+      "id": "s_arch_spines",
+      "statement": "Each operand is its own independent variable-length spine chain, joined to the operator only via port edges; there is no single shared/padded array spanning both operands.",
+      "status": "given",
+      "derived_from": null,
+      "antecedents": null,
+      "negation_handling": null,
+      "negation_note": ""
+    },
+    "s_channels": {
+      "id": "s_channels",
+      "statement": "Only two EdgeTypes exist, STRUCTURAL and OPERATIONAL, with specific channels already reserved per node; no generic token-edge type exists.",
+      "status": "given",
+      "derived_from": null,
+      "antecedents": null,
+      "negation_handling": null,
+      "negation_note": ""
+    },
+    "s_negenc": {
+      "id": "s_negenc",
+      "statement": "A negative result is encoded as a finished 0-n structural subtree, not a sign-tag attached to a value.",
+      "status": "given",
+      "derived_from": null,
+      "antecedents": null,
+      "negation_handling": null,
+      "negation_note": ""
+    },
+    "s_marker_channels": {
+      "id": "s_marker_channels",
+      "statement": "The marker-edge mechanism uses only the two channels already free on existing node types, leaf OP-out and spine OP-in, deliberately avoiding any new EdgeType.",
+      "status": "given",
+      "derived_from": null,
+      "antecedents": null,
+      "negation_handling": null,
+      "negation_note": ""
+    },
+    "s_4phase_refmodel": {
+      "id": "s_4phase_refmodel",
+      "statement": "The current 4-phase arithmetic was checked clean as a Python reference model over a,b in 1..127 for both positive and negative results.",
+      "status": "given",
+      "derived_from": null,
+      "antecedents": null,
+      "negation_handling": null,
+      "negation_note": ""
+    },
+    "s_4phase_reachability": {
+      "id": "s_4phase_reachability",
+      "statement": "Empirical sweep over a,b in 1..63 with a less than b found only 6 of the 8 possible frontier-table keys are ever reached; the other 2 are asserted, not proven, unreachable.",
+      "status": "given",
+      "derived_from": null,
+      "antecedents": null,
+      "negation_handling": null,
+      "negation_note": ""
+    },
+    "s_frontier_history": {
+      "id": "s_frontier_history",
+      "statement": "An earlier attempt to negate only the phase-1 low-bit results in place failed on many cases across the a less than b sweep 0..31, because the low bits are coupled to the overhang region through the standing borrow.",
+      "status": "given",
+      "derived_from": null,
+      "antecedents": null,
+      "negation_handling": null,
+      "negation_note": ""
+    },
+    "s_armA_false": {
+      "id": "s_armA_false",
+      "statement": "Arm A's core determinism claim, that at most one active token/label state exists in the graph at any time, has been empirically refuted: grade_armA.py found 21844/65025 inputs where sign-delivery and trim run as concurrent processes.",
+      "status": "given",
+      "derived_from": null,
+      "antecedents": null,
+      "negation_handling": null,
+      "negation_note": ""
+    },
+    "s_armB_verified": {
+      "id": "s_armB_verified",
+      "statement": "Arm B passed grade_armB.py over a full sweep a,b in 1..255 plus 4000 random 16-bit pairs, on its own toy graph model.",
+      "status": "given",
+      "derived_from": null,
+      "antecedents": null,
+      "negation_handling": null,
+      "negation_note": ""
+    },
+    "adv_native_arch": {
+      "id": "adv_native_arch",
+      "statement": "The 4-phase mechanism's rules were authored directly against Perspective's actual primitives, spine-per-operand, two-EdgeType channel model, 0-n frame output, so adopting it needs no additional encoding or translation layer.",
+      "status": "derived",
+      "derived_from": [
+        {
+          "parents": [
+            "s_arch_spines",
+            "s_channels",
+            "s_negenc"
+          ],
+          "rule": "the design's own construction history in the KB shows it was iterated directly against these three constraints"
+        }
+      ],
+      "antecedents": null,
+      "negation_handling": null,
+      "negation_note": ""
+    },
+    "adv_no_new_edge_type": {
+      "id": "adv_no_new_edge_type",
+      "statement": "The marker mechanism fits inside the existing two-EdgeType model with no new edge kind requested, unlike Arm B's generic token-edge.",
+      "status": "derived",
+      "derived_from": [
+        {
+          "parents": [
+            "s_channels",
+            "s_marker_channels"
+          ],
+          "rule": "direct structural fact: marker uses only already-free channels"
+        }
+      ],
+      "antecedents": null,
+      "negation_handling": null,
+      "negation_note": ""
+    },
+    "adv_sign_native": {
+      "id": "adv_sign_native",
+      "statement": "Output is produced directly as the canonical 0-n structural frame, with no separate sign-tag node needing a later reframing step.",
+      "status": "derived",
+      "derived_from": [
+        {
+          "parents": [
+            "s_negenc"
+          ],
+          "rule": "the mechanism's output convention matches the negative_encoding decision by construction, not by translation"
+        }
+      ],
+      "antecedents": null,
+      "negation_handling": null,
+      "negation_note": ""
+    },
+    "adv_reachability_narrowed": {
+      "id": "adv_reachability_narrowed",
+      "statement": "An empirical sweep has already narrowed the frontier table to 6 of 8 keys, reducing the number of graph rules that must be authored for Part 2.",
+      "status": "derived",
+      "derived_from": [
+        {
+          "parents": [
+            "s_4phase_reachability"
+          ],
+          "rule": "direct restatement of the sweep result as a design advantage"
+        }
+      ],
+      "antecedents": null,
+      "negation_handling": null,
+      "negation_note": ""
+    },
+    "adv_refmodel_validated": {
+      "id": "adv_refmodel_validated",
+      "statement": "The arithmetic has already been checked clean as a Python reference model across the full sign range, a stronger empirical base than either Arm had before its own falsifier was run.",
+      "status": "derived",
+      "derived_from": [
+        {
+          "parents": [
+            "s_4phase_refmodel"
+          ],
+          "rule": "direct restatement of the reference-model sweep result"
+        }
+      ],
+      "antecedents": null,
+      "negation_handling": null,
+      "negation_note": ""
+    },
+    "dis_frontier_complexity": {
+      "id": "dis_frontier_complexity",
+      "statement": "The frontier table was only reached after an earlier simpler attempt failed, and 2 of 8 keys remain asserted, not proven, unreachable.",
+      "status": "derived",
+      "derived_from": [
+        {
+          "parents": [
+            "s_frontier_history",
+            "s_4phase_reachability"
+          ],
+          "rule": "restate the design's own correction history and open reachability gap"
+        }
+      ],
+      "antecedents": null,
+      "negation_handling": null,
+      "negation_note": ""
+    },
+    "dis_no_engine_validation": {
+      "id": "dis_no_engine_validation",
+      "statement": "\"Validated\" here means only the Python reference model; the actual VF2-based rule engine has not run this mechanism.",
+      "status": "derived",
+      "derived_from": [
+        {
+          "parents": [
+            "s_4phase_refmodel"
+          ],
+          "rule": "restate the reference-model-only scope as a limitation"
+        }
+      ],
+      "antecedents": null,
+      "negation_handling": null,
+      "negation_note": ""
+    },
+    "a_subdef": {
+      "id": "a_subdef",
+      "statement": "diff_i = a_i XOR b_i XOR borrow_in; borrow_out = (NOT a_i AND b_i) OR (NOT a_i AND borrow_in) OR (b_i AND borrow_in).",
+      "status": "assumed",
+      "derived_from": null,
+      "antecedents": null,
+      "negation_handling": "carried",
+      "negation_note": "standard full-subtractor recurrence; would flip if Perspective's own bit convention differs from LSB-first / this exact borrow formula — unverified against actual engine source this session"
+    },
+    "a_negdef": {
+      "id": "a_negdef",
+      "statement": "new_bit = NOT(old_bit) XOR carry_in; carry_out = NOT(old_bit) AND carry_in.",
+      "status": "assumed",
+      "derived_from": null,
+      "antecedents": null,
+      "negation_handling": "carried",
+      "negation_note": "standard two's-complement negate recurrence; would flip under a different negation convention — unverified against actual engine source this session"
+    },
+    "d_armB_translation_cost": {
+      "id": "d_armB_translation_cost",
+      "statement": "Arm B assumes one shared or padded spine with a generic token-edge type, both conflicting with Perspective's independent-spine model and fixed two-EdgeType channel reservation.",
+      "status": "derived",
+      "derived_from": [
+        {
+          "parents": [
+            "s_arch_spines",
+            "s_channels"
+          ],
+          "rule": "structural comparison of Arm B's alphabet against Perspective's primitives"
+        }
+      ],
+      "antecedents": null,
+      "negation_handling": null,
+      "negation_note": ""
+    },
+    "d_armB_sign_conflict": {
+      "id": "d_armB_sign_conflict",
+      "statement": "Arm B's SIGN-EDGE tag conflicts with encoding negativity as a graph shape; adopting its output as-is needs an extra step to reframe the tagged result into a 0-n frame.",
+      "status": "derived",
+      "derived_from": [
+        {
+          "parents": [
+            "s_negenc"
+          ],
+          "rule": "comparison of Arm B's sign-node convention against the negative_encoding decision"
+        }
+      ],
+      "antecedents": null,
+      "negation_handling": null,
+      "negation_note": ""
+    },
+    "d_armA_contribution": {
+      "id": "d_armA_contribution",
+      "statement": "Independent of its refuted determinism claim, Arm A's mechanism of carrying phase state as compound labels via in-place relabeling, rather than separate token nodes, is a salvageable idea that does not itself depend on the token-uniqueness argument shown false.",
+      "status": "derived",
+      "derived_from": [
+        {
+          "parents": [
+            "s_armA_false"
+          ],
+          "rule": "separating Arm A's labeling mechanism from its refuted uniqueness argument"
+        }
+      ],
+      "antecedents": null,
+      "negation_handling": null,
+      "negation_note": ""
+    },
+    "cand_hybrid_claim": {
+      "id": "cand_hybrid_claim",
+      "statement": "Adopt a hybrid: keep Perspective's actual architecture in full and replace the current design's Phase-2/Phase-3/frontier-table machinery with one uniform two's-complement negate pass applied to the entire raw phase-1 result, extended through the subtrahend's overhang via the existing a-absent implicit-zero rule, eliminating the frontier table.",
+      "status": "derived",
+      "derived_from": [
+        {
+          "parents": [
+            "adv_native_arch",
+            "adv_no_new_edge_type",
+            "adv_sign_native",
+            "d_armA_contribution",
+            "d_armB_translation_cost",
+            "a_subdef",
+            "a_negdef"
+          ],
+          "rule": "retain every current-design advantage (native arch, no new edge type, native sign encoding) while dropping dis_frontier_complexity via a whole-result negate built from the standard recurrences, borrowing Arm A's relabel-only representation instead of Arm B's token edges"
+        }
+      ],
+      "antecedents": null,
+      "negation_handling": null,
+      "negation_note": ""
+    },
+    "cand_4phase_claim": {
+      "id": "cand_4phase_claim",
+      "statement": "Adopt the current validated 4-phase mechanism unchanged, including its known frontier-table limitations.",
+      "status": "derived",
+      "derived_from": [
+        {
+          "parents": [
+            "adv_native_arch",
+            "adv_no_new_edge_type",
+            "adv_sign_native",
+            "adv_reachability_narrowed",
+            "adv_refmodel_validated",
+            "dis_frontier_complexity",
+            "dis_no_engine_validation"
+          ],
+          "rule": "restate the mechanism as currently specified, citing its full honest advantage/disadvantage ledger"
+        }
+      ],
+      "antecedents": null,
+      "negation_handling": null,
+      "negation_note": ""
+    },
+    "cand_armA_claim": {
+      "id": "cand_armA_claim",
+      "statement": "Adopt Arm A's design, compound spine labels with no separate token edges, as documented, including its refuted single-active-token determinism claim.",
+      "status": "given",
+      "derived_from": null,
+      "antecedents": null,
+      "negation_handling": null,
+      "negation_note": ""
+    },
+    "cand_armB_claim": {
+      "id": "cand_armB_claim",
+      "statement": "Adopt Arm B's design, translated onto Perspective's actual encoding primitives.",
+      "status": "derived",
+      "derived_from": [
+        {
+          "parents": [
+            "s_armB_verified",
+            "d_armB_translation_cost",
+            "d_armB_sign_conflict"
+          ],
+          "rule": "the candidate is the translated-for-adoption version, which inherits the translation and sign-encoding costs even though the untranslated design verified clean on its own toy model"
+        }
+      ],
+      "antecedents": null,
+      "negation_handling": null,
+      "negation_note": ""
+    }
+  },
+  "candidates": {
+    "cand_4phase_claim": {
+      "id": "cand_4phase_claim",
+      "statement": "current 4-phase mechanism, unchanged",
+      "discriminator": "Native architecture and already-narrowed/validated arithmetic, at the cost of frontier-table complexity and no real-engine validation yet."
+    },
+    "cand_armA_claim": {
+      "id": "cand_armA_claim",
+      "statement": "Arm A, as documented",
+      "discriminator": "Only candidate whose core correctness claim is empirically refuted."
+    },
+    "cand_armB_claim": {
+      "id": "cand_armB_claim",
+      "statement": "Arm B, translated",
+      "discriminator": "Verified on its own toy model, but carries unpaid architecture-translation and sign-encoding costs."
+    },
+    "cand_hybrid_claim": {
+      "id": "cand_hybrid_claim",
+      "statement": "hybrid: native arch + Arm B/A-style whole-result negate",
+      "discriminator": "Keeps every current-design advantage, drops the frontier table, checked clean on a large arithmetic sweep, still reference-model only."
+    }
+  },
+  "checks": {
+    "f_armA": {
+      "id": "f_armA",
+      "kind": "falsifier",
+      "target": "cand_armA_claim",
+      "method": "cite grade_armA.py sweep result",
+      "result": "21844/65025 inputs violate the assumed single-active-token invariant",
+      "outcome": "failed"
+    },
+    "f_armB": {
+      "id": "f_armB",
+      "kind": "falsifier",
+      "target": "cand_armB_claim",
+      "method": "check whether the translation has actually been designed/closed",
+      "result": "No — shared/padded spine, token-edge type, and sign-tag node are all still unresolved gaps against Perspective's actual primitives",
+      "outcome": "failed"
+    },
+    "f_4phase": {
+      "id": "f_4phase",
+      "kind": "falsifier",
+      "target": "cand_4phase_claim",
+      "method": "check engine validation status and frontier-table completeness",
+      "result": "reference-model only, not run against the real rule engine; 2 of 8 frontier keys unproven unreachable",
+      "outcome": "survived"
+    },
+    "f_hybrid": {
+      "id": "f_hybrid",
+      "kind": "falsifier",
+      "target": "cand_hybrid_claim",
+      "method": "implemented both recurrences in Python; extended phase-1's borrow computation through the full max(len(a),len(b)) width; applied one uniform two's-complement negate over the entire raw result when the final borrow escaped; swept combinatorially, by edge case, and randomly against ground truth",
+      "result": "0 failures across a,b in 0..199 combinatorially (~40000 pairs), 8 explicit edge cases, and 20000 random pairs up to 24-bit width",
+      "outcome": "survived"
+    }
+  },
+  "obligations": {},
+  "committed": {
+    "answer": "cand_hybrid_claim",
+    "statement": "Adopt a hybrid: keep Perspective's actual architecture in full and replace the current design's Phase-2/Phase-3/frontier-table machinery with one uniform two's-complement negate pass applied to the entire raw phase-1 result, extended through the subtrahend's overhang via the existing a-absent implicit-zero rule, eliminating the frontier table.",
+    "evidence_label": "assumed",
+    "assumptions_carried": [
+      "a_negdef",
+      "a_subdef"
+    ],
+    "carried_unexplored": [
+      "a_negdef",
+      "a_subdef"
+    ]
+  },
+  "call_log": [
+    [
+      "ground",
+      [
+        "s_arch_spines",
+        "s_channels",
+        "s_negenc",
+        "s_marker_channels",
+        "s_4phase_refmodel",
+        "s_4phase_reachability",
+        "s_frontier_history",
+        "s_armA_false",
+        "s_armB_verified"
+      ]
+    ],
+    [
+      "ground",
+      [
+        "adv_native_arch",
+        "adv_no_new_edge_type",
+        "adv_sign_native",
+        "adv_reachability_narrowed",
+        "adv_refmodel_validated"
+      ]
+    ],
+    [
+      "ground",
+      [
+        "dis_frontier_complexity",
+        "dis_no_engine_validation"
+      ]
+    ],
+    [
+      "ground",
+      [
+        "a_subdef",
+        "a_negdef",
+        "d_armB_translation_cost",
+        "d_armB_sign_conflict",
+        "d_armA_contribution",
+        "cand_hybrid_claim",
+        "cand_4phase_claim",
+        "cand_armA_claim",
+        "cand_armB_claim"
+      ]
+    ],
+    [
+      "propose",
+      [
+        "cand_4phase_claim",
+        "cand_armA_claim",
+        "cand_armB_claim",
+        "cand_hybrid_claim"
+      ]
+    ],
+    [
+      "check",
+      [
+        "f_armA",
+        "f_armB",
+        "f_4phase",
+        "f_hybrid"
+      ]
+    ],
+    [
+      "carry",
+      "a_subdef"
+    ],
+    [
+      "carry",
+      "a_negdef"
+    ],
+    [
+      "commit",
+      "cand_hybrid_claim"
+    ]
+  ]
+}
