@@ -196,15 +196,33 @@ def build_reversed_graph2(graph2: PerspectiveGraph, confirmed_crossings: dict = 
         for new_node, categories in new_output_categories.items():
             _attach_categories(g, new_node, ph, categories)
 
-    # --- mapping edges: reverse core.mapping_in.
-    #     old (in_node -> out_node) becomes new (out_node -> in_node), i.e.
-    #     new_input(old_out) -> new_output(old_in) for every old_in that
-    #     mapped to old_out. ---
-    for old_out, old_ins in core.mapping_in.items():
+    # --- mapping edges: reverse core.inherit ONLY (Sven, this session --
+    #     the actual bug: an earlier version reversed core.mapping_in, which
+    #     includes EVERY fan-in candidate, winners AND losers. inherit is
+    #     the WINNING/survived mapping alone, and it is guaranteed injective
+    #     both directions (compile_core's own documented invariant: each
+    #     input inherited by at most one output) -- reversing it needs no
+    #     fan-in/fan-out handling at all. old inherit[out_node]=in_node
+    #     becomes new_input(old_out) -> new_output(old_in).
+    #
+    #     This ALONE correctly handles born and delete with zero special-
+    #     casing: a forward-BORN out_node has no inherit entry, so it gets
+    #     no reverse mapping edge -- it stays a plain new-input context node
+    #     with no output correspondence (nothing to recover, because nothing
+    #     was inherited from it). A forward-DELETED in_node (zero-trace or
+    #     a fan-in loser) is never an inherit VALUE either, so its new-output
+    #     position also gets no reverse mapping edge -- it correctly stays
+    #     unrecovered. That absence is not a defect to patch: it is exactly
+    #     what should make the downstream footprint/isomorphism check catch
+    #     genuine irreversibility (a position the true retained layer has,
+    #     that the reconstruction cannot produce). No synthetic edges, no
+    #     forced classification, no reverse-specific logic -- the reversed
+    #     graph2 is just a graph2; compile_core classifies it the same way
+    #     it classifies any other. ---
+    for old_out, old_in in core.inherit.items():
         new_src = node_map[old_out]
-        for old_in in old_ins:
-            new_tgt = node_map[old_in]
-            g.add_edge(new_src, new_tgt, EdgeType.OPERATIONAL)
+        new_tgt = node_map[old_in]
+        g.add_edge(new_src, new_tgt, EdgeType.OPERATIONAL)
 
     return g, node_map
 

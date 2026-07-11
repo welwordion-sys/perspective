@@ -74,6 +74,14 @@ class PlainGraphLayeredStub:
                                       # "adopt with existing id" method exists
                                       # on PerspectiveGraph (add_node() always
                                       # mints a fresh id) -- insert directly.
+        if present:
+            # BUG FOUND AND FIXED this session (Sven's substrate/failure-level
+            # question led directly to finding this): result._next_id was
+            # never synced with the actual ids inserted above, staying at its
+            # default (0) even when the graph holds nodes up to a much higher
+            # id -- latent, would collide the moment anything downstream
+            # calls result.add_node() to mint a genuinely fresh node.
+            result._next_id = max(n.id for n in present) + 1
         for node in present:
             written = self._edges_at.get(node, {}).get(layer)
             edge_set = written if written is not None else self.edges_of(node, self._base_layer_key)

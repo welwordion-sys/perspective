@@ -146,6 +146,21 @@ class LayerRegistry:
             raise ValueError(f"Layer {record.key!r} already registered.")
         self._records[record.key] = record
 
+    def reclassify(self, key: LayerKey, record: LayerRecord) -> None:
+        """Replace an EXISTING record for `key` (unlike add(), which forbids
+        overwriting) -- for the reversibility checker (reverse_compound.py:
+        reclassify_after_firing) to upgrade a poisoned-apple UPWARD default
+        to SIDEWAYS once reverse_fire proves reversibility for that layer.
+        record.key must equal key; LayerRecord's own __post_init__ still
+        enforces the travel_type/provenance invariant (SIDEWAYS forbids
+        provenance, UPWARD requires it) -- this method does not bypass that.
+        """
+        if key not in self._records:
+            raise ValueError(f"Layer {key!r} not registered -- nothing to reclassify.")
+        if record.key != key:
+            raise ValueError(f"record.key {record.key!r} does not match {key!r}.")
+        self._records[key] = record
+
     def get(self, key: LayerKey) -> LayerRecord:
         return self._records[key]
 
