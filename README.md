@@ -1,62 +1,75 @@
 # Perspective
 
-**Arithmetic as structure, not calculation.**
+**A system that explores representation space explicitly, instead of learning a
+representation as a byproduct of optimization — with arithmetic as the current
+proving ground, not the goal.**
 
-Perspective is a graph-rewriting system that performs arithmetic by treating numbers
-as *shapes* rather than values to be crunched. A number isn't stored as an integer —
-it's encoded as a small graph, and computing `a + b` means finding a pattern inside
-that graph and rewriting it into another one. Addition, subtraction, and eventually
-whatever a genetic algorithm invents on top of them, are all done this way: not by
-running an ALU, but by recognizing structure and transforming it.
+Most machine learning treats representation as something a model backs into while
+optimizing for a task. Perspective inverts that: representation *is* the object
+being built and searched over. Everything else — including the arithmetic engine
+that currently lives in this repo — exists to test whether a given representation
+holds up.
 
 ---
 
 ## The core idea
 
-Take a number. Instead of `7`, picture a short chain of nodes — a **spine** — ending
-in leaves that carry bit values. Two numbers side by side, linked at an operator node,
-form the input to an operation. To *compute*, Perspective doesn't evaluate anything
-in the traditional sense — it searches the graph for a **subgraph isomorphism**: a
-region that matches the left-hand side of some known rule. When it finds one, it
-rewrites that region into the rule's right-hand side. Do this enough times, in the
-right order, and the graph settles into a new spine — the result.
+A number isn't stored as an integer here — it's encoded as a small graph: a chain of
+nodes (a **spine**) ending in leaves that carry bit values. Two numbers linked at an
+operator node form the input to an operation. Computing `a + b` doesn't mean
+evaluating anything in the traditional sense — it means searching the graph for a
+**subgraph isomorphism** (via a VF2-based matcher) that matches the left-hand side of
+some known rule, then rewriting that region into the rule's right-hand side. Do this
+enough times and the graph settles into a new spine: the result.
 
-This is done with a VF2-based matcher (the classic algorithm for subgraph
-isomorphism) and a library of hand-authored rewrite rules — currently a solid,
-validated set for addition, with subtraction under active construction using a
-four-phase borrow mechanism.
+Arithmetic is the **test domain**, not the point. The original test domain was
+actually MNIST digit recognition — arithmetic replaced it because it has a
+known-correct ground truth you can check a representation against unambiguously.
+Addition is built and validated (213 confirmed `bit_add` rules); subtraction is under
+active construction.
 
-Nothing about this requires numbers to be small, or the rules to be exhaustive by
-hand forever — which is the point of the next layer.
+## Why this way: the actual target
 
-## Why graphs
+The bigger design is a **Representation Space Traversal Architecture**: two systems
+sharing a library. A *Data Transformation System* — the **traveler** — explores
+representation space directly, growing structure and looking for matches rather than
+optimizing a fixed objective. A *Logic Rewriting System* improves the traveler's own
+rules over time via a genetic algorithm operating on rule graphs, not on data.
 
-Encoding arithmetic as graph structure buys something a normal calculator doesn't
-have: **rules are objects**. A rule is just a pair of graphs (before/after) plus a
-mapping between them. That means rules can be inspected, compared, composed,
-mutated, and — crucially — checked for a structural property most calculators never
-have to think about: **is this operation reversible?**
+The exploration model (internally called the **Quantum Traveler**) doesn't search
+for *a* path — it grows a population of structures in parallel, branching like moss
+through representation space. Branches that explode structurally get pruned; branches
+that dead-end just stop, cheaply, no backtracking; a branch that reaches the target
+cleanly exits and becomes a strong fitness signal for the rules that got it there.
 
-Perspective has a reversibility classifier that takes a rule and determines whether
-it can be run backwards as a valid rule in its own right, purely from the structure
-of what crosses the rule's boundary (which nodes are born, which die, which edges
-survive). This isn't a convention bolted on — it falls out of the graph structure
-itself. A rule earns "reversible" or it doesn't, and the classifier can prove which.
+The endpoint vision is self-similar: a **traveler** explores representation space, an
+**overseer** manages a population of travelers and reads their paths as data to
+direct the population, a **senior overseer** does the same one level up for
+overseers, and a **human** holds a deliberately non-automated threshold gate — the
+system doesn't get to decide for itself when it's ready to advance. The same graph
+matching and rewriting machinery runs at every one of those levels.
 
-## Where it's going: rules that write rules
+## Rules that write rules
 
-The rule library today is hand-built. The design target is a **genetic algorithm**
-that generates new rules on its own — recombining pieces of existing rules,
-mutating the connective structure between them, and keeping what survives fitness
-checks against a known-correct arithmetic reducer. The GA's search target is solving
-equations down to the form `x = number`, treating commutation and rearrangement as
-waypoints, not special cases.
+The rule library for arithmetic is hand-built today. The design target is a genetic
+algorithm that generates new rules itself — recombining a donor rule's input pattern
+with another donor's output pattern, then repairing the connecting mapping between
+them by mutation (mutation is a repair operator here, not a rival generator). Its
+search target, in the arithmetic domain, is solving equations down to `x = number`,
+with commutation and rearrangement as required waypoints, not the objective itself.
 
-The reversibility work matters directly here: legality for a GA-generated move
-splits along exactly this line. An *irreversible* (upward, value-changing) move has
-to preserve correctness under the reducer. A *reversible* (sideways) move only has
-to prove it's invertible — a much cheaper and more local check. Reversibility isn't
-a side feature; it's the hinge the whole generative side of the project turns on.
+Legality for a GA-generated move splits by reversibility. An *irreversible* (upward)
+move has to preserve correctness against a fixed, known-correct arithmetic reducer.
+A *reversible* (sideways) move only has to prove it's invertible — cheaper, and it's
+allowed to produce encodings the reducer can't even process, because sideways moves
+are exactly how alternate representations get explored. Sideways moves don't make
+direct progress toward a solution, so they're scored indirectly: rewind the sideways
+step after a following upward move, and score the combined path in the reducer — this
+is exact whenever the sideways move's inverse still applies after the upward step.
+
+Perspective's reversibility classifier — which determines whether a rule can run
+backwards as a valid rule in its own right, purely from what crosses its boundary —
+is what makes the "sideways" half of that split checkable at all, rather than assumed.
 
 ## What's built vs. what's designed
 
@@ -65,7 +78,8 @@ a side feature; it's the hinge the whole generative side of the project turns on
 | Addition (spine graphs, bit rules) | Built and validated — 213 confirmed `bit_add` rules |
 | Subtraction | Init-stage rules validated; full bit-level build in progress |
 | Reversibility classifier | Designed and implemented; confirmed against a real production rule |
-| Genetic algorithm | Architecture designed (five-node model); implementation not started |
+| GA architecture (search target, legality, generator, recombination, fitness) | Designed (five-node model); implementation not started |
+| Traveler / overseer / senior-overseer levels | Long-term architecture; not built |
 
 ## The origin story
 
