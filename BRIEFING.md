@@ -1,218 +1,85 @@
-# Perspective — Mobile Session Briefing
-**Updated:** 2026-05-10 | **Next task:** P2 — Write tests, validate apply() end-to-end
+# Perspective — Session Bootstrap (BRIEFING.md)
 
----
+**Updated:** 2026-07-08 · Two jobs: (1) introduce the project to a cold
+session, (2) route to where live truth lives. Embedded design facts cite
+their KB nodes; **on any conflict, the KB wins** — this file is a snapshot
+and snapshots age.
 
 ## Project in one sentence
-Representation Space Traversal AI — a system that solves problems by traversing the space of graph representations until it finds one where the answer is obvious, rather than computing the answer directly.
+Representation Space Traversal AI — solves problems by traversing the space
+of graph representations until one makes the answer obvious, rather than
+computing the answer directly.
 
----
+## Where truth lives
+| What | Authority | Access |
+|---|---|---|
+| Live state, decisions, open questions | Supabase KB | `curl "https://oniywvgbjtusvrgoklrm.supabase.co/functions/v1/kb?q=node&project=meta&id=session_start"` — follow its instructions |
+| Code | this repo, `main` | git / raw.githubusercontent |
+| Reasoning discipline | ERS repo | `curl -sO https://raw.githubusercontent.com/welwordion-sys/ERS/main/reason_setter.py` (+ PROTOCOL.md); check version string line 1 (v0.4+), refetch if stale |
 
-## Stack
-- Python 3.12, PyTorch 2.5.1, PyTorch Geometric 2.7.0, CUDA 12.1
-- GPU: NVIDIA RTX 4060 Ti 16GB
-- Repo: github.com/welwordion-sys/perspective
-- Local: D:\Projects\perspective
-- Activate env: `.venv\Scripts\activate` from D:\Projects\perspective
+**With Supabase/MCP (verify per-session via tool check, never assume):** KB is
+authoritative. **Without:** work from this file; anything live, ask Sven.
 
----
+## How Perspective works (current as of 2026-07-08, per KB)
 
-## What exists
-**P1 — Complete (2026-05-01)**
-- `basic_machinery/graph.py` — PerspectiveGraph, directed graph with binary edge typing, node/edge management, copy, restore, subgraph(). Unchanged.
-- `basic_machinery/operations.py` — Triple graph schema (pattern, graph2s, graph2o). Committed 2026-05-06.
-- 9 tests — ALL BROKEN by operations.py redesign, need rewriting.
+**Two systems.** Data Transformation System traverses representation space
+via graph rewrite rules; Logic Rewriting System improves the rules by GA
+(fitness: label-conditioned reproducibility).
 
-**P2 — In progress**
-- `basic_machinery/encoding.py` — REWRITTEN this session (2026-05-10). See encoding decisions below.
-- `basic_machinery/arithmetic.py` — REWRITTEN this session (2026-05-10). 23 rules, all triple schema. See rule set below.
-- Tests: not yet written.
+**Substrate.** Directed graphs, two edge types (structural / operational),
+no node attributes. Layer types: within-layer rules (same abstraction,
+`3+4→7`) and layer transitions (change abstraction).
 
----
+**Rules** are triples (pattern, graph2s, graph2o), fired in two passes:
+match pattern → pass 1 rewrites structural (operational stripped) → pass 2
+rewrites operational (structural stripped) → stripped edges reattach to
+surviving nodes. Nodes absent from output are removed; unmatched output
+nodes instantiate fresh. (operations.py, unchanged since 2026-05-06.)
 
-## operations.py schema (complete, committed 2026-05-06)
+**Number encoding — SPINE (KB: `Spine number encoding`, verified).** Spine
+nodes chained structurally LSB→MSB; each spine node points operationally at
+its own bit node; bit value = self-loop on the bit node; operator attaches
+at the LSB spine node. Supersedes two earlier encodings (binary tree, flat
+bit chain) — **chain-era rule traces do not carry over** (KB warning).
 
-**Triple schema:** (pattern, graph2s, graph2o)
-- `pattern` — mixed edge types, used for matching
-- `graph2s` — strip OPERATIONAL, output STRUCTURAL. Pass 1.
-- `graph2o` — strip STRUCTURAL, output OPERATIONAL. Pass 2.
+**Operators.** Identity by unique cycle size: `+`3 `-`4 `*`5 `/`6 `=`7
+(sizes 1, 2 reserved for bit value / carry). Tail on the cycle = finished
+(terminal); no tail = reducible. Known defect: the anchor does not
+discriminate operand order — fix `operator_port_topology` (left→cycle[0],
+right→cycle[1]) is designed, pending implementation (KB:
+`operand_order_gap_root_cause`).
 
-**Firing sequence:**
-1. match(pattern, graph) → node_map
-2. Pass 1: strip operational → match graph2s input → follow mapping → write structural output → reattach operational via step 6
-3. Pass 2: strip structural (updated_map from Pass 1) → match graph2o input → follow mapping → write operational output → reattach structural via step 6
+**Carry.** One STRUCTURAL edge into the result spine (KB:
+`spine_carry_attaches_leaf_structural`, verified — supersedes the old
+operational 2-cycle). The result-spine node is REQUIRED for carry
+detection; a trim that drops it passes no-carry tests and breaks carry
+(KB warning).
 
-**Key behaviours:**
-- Nodes absent from transition output are removed (step 4b)
-- New nodes in transition not matched from input are instantiated fresh
-- Step 6 reattaches stripped edges to surviving mapped nodes — enables external edge rewiring without including parent in pattern
-- restore() is a standalone function: snapshot → apply → revert on failure
+**Arithmetic pipeline — COMPLETE for addition.** `arithmetic_spine.py`
+(register_all), `spine_bitadd_v2.py`, `spine_finalise_multibit.py`,
+`prop_test.py`. 64/64 addition battery, 227/227 property tests. The old
+23-rule arithmetic.py catalog is superseded. Subtraction: design validated
+(KB: `subtraction_design`), implementation under active redesign — live in
+the KB, not here.
 
----
+**Grouping/dispatch** committed at `578e0f3`, selftest 36 rules PASS.
+Soundness boundary: the transitivity bound holds for node-matching, NOT for
+fusion — read KB `grouping_incremental_insert` before refactoring core_tree.
 
-## Encoding decisions (complete, encoding.py rewritten 2026-05-10)
+**Open design (documented, unimplemented):** compound match resolution —
+overlapping rule firings merge rather than order (KB: `Compound Match
+Resolution`).
 
-**Tag design:**
-- `_tag_cycle(node, size)` — unfinished operator/equality. Directed cycle of `size` nodes. cycle[0] gets a left anchor (dead-end structural node) for operand asymmetry and GA grammar consistency.
-- `_tag_cycle_plus(node, size)` — finished operator/equality. Same as _tag_cycle but cycle[-1] also has a tail node. Tail = finished state.
-- Both functions include the anchor — uniform grammar for GA mutation.
+## Working rules (stable)
+- Truth over politeness; name errors directly; no unearned praise; flag
+  tentative positions before stating them as conclusions.
+- Pseudocode and changed-region diffs over full file dumps.
+- Corrections edit the wrong claim in place — never append a contradicting
+  note below it.
+- Design decisions another session inherits: run the ERS setter first
+  (enforcement criterion: KB `meta.workflow`).
 
-**Operator cycle sizes (unique per operator, no overloading):**
-- `+`: 3-cycle
-- `-`: 4-cycle
-- `*`: 5-cycle
-- `/`: 6-cycle
-- `=`: 7-cycle
-- Sizes 1 (bit value 1) and 2 (carry marker) reserved.
-
-**Finished/unfinished semantics:**
-- Unfinished = operator can still be reduced (both operands are concrete numbers). Arithmetic rules fire on unfinished operators.
-- Finished = terminal, no rules fire. Happens when at least one operand contains a parameter.
-- build_operator(graph, op, finished=False) — default unfinished.
-
-**Numbers:** Open-length binary tree. MSB at root, LSB at deepest right leaf. Empty node = 0, self-loop = 1. build_number returns (root, lsb) tuple — lsb known at construction, no traversal needed.
-
-**Parameters:** Bidirectional structural edge to companion node. build_parameter returns (root, lsb) tuple where both are the same node.
-
-**connect_operands:** Now takes (op_node, left_root, left_lsb, right_root, right_lsb). Position edges attached to LSBs at encode time. Applies to all operators — bit traversal is universal.
-
-**Negative numbers:** Represented as `0 - n` subtree.
-
-**Carry marker:** 2-cycle. One node attached to result node via operational edge. Asymmetry from directionality of that operational edge — no extra structure needed.
-
-**Position pointer:** Two operational edges from operator node to current bit position (LSB initially). Advance = position edge moves to parent. Parent included in pattern for match — node switching handles the rest.
-
-**Tombstone marker:** Operational self-loop on node. Propagated to structural children by tombstone_gc rule.
-
-**Seed rules (in encoding.py, triple schema):**
-- add_zero_collapse: x + 0 -> x
-- sub_zero_collapse: x - 0 -> x
-- mul_one_collapse: x * 1 -> x
-- div_one_collapse: x / 1 -> x
-- mul_zero_collapse: x * 0 -> 0
-
----
-
-## Arithmetic rule set (arithmetic.py, 23 rules, triple schema)
-
-**add_init (4 rules):** add_init_00, add_init_01, add_init_10, add_init_11
-- Pattern: op node + left LSB + right LSB + left parent + right parent. No result node.
-- graph2s: create result node with correct bit tag.
-- graph2o: wire op → left_parent, op → right_parent, op → result. Add carry if needed.
-
-**bit_add (8 rules):** bit_add_XY_cZ for X,Y in {0,1}, Z in {0,1}
-- Pattern: op node + left bit + parent + right bit + parent + result node. Carry encoded as 2-cycle on result node.
-- graph2s: retag result node for new bit value. Carry 2-cycle absent from transition = removed.
-- graph2o: advance position edges to parents. Rewire op → result. Add carry if produced.
-
-**drain (8 rules):** drain_left/right_B_cC for B in {0,1}, C in {0,1}
-- Fires when one side exhausted (no parent in pattern). Active side advances, exhausted side stays.
-- 4 rules per side (bit × carry).
-
-**add_finalise (8 rules):** add_finalise_LR_cC for L,R,C in {0,1}
-- Fires when both positions at MSB (no parents). Op node recycled as result root — tag structure removed by step 4b, bare op node inherits parent's operational edge.
-- graph2s: connect recycled op node to result tree. If carry_out: create extra MSB node (value=1) above result.
-- graph2o: empty.
-
-**tombstone_gc (1 rule):**
-- Pattern: tombstoned node (operational self-loop) + structural child.
-- graph2s: child gets tombstone. Parent removed.
-
----
-
-## Design decisions made this session
-
-1. Operator identity by unique cycle size — no overloading, no tail for identity.
-2. Tail = finished state uniformly across all operators and equality.
-3. Anchor off cycle[0] on all tags — operand asymmetry + GA grammar consistency.
-4. build_number returns (root, lsb) — lsb known at construction.
-5. connect_operands attaches to LSBs — universal, applies to all operators.
-6. Carry marker on result node, not op node — op node pattern stays uniform across bit rules.
-7. Tombstone = operational self-loop (not 3-node chain as in old design).
-8. Op node recycled as result root in add_finalise — no rewiring problem.
-9. Drain rules handle exhausted side by pattern absence of parent — no explicit exhaustion marker.
-10. Layer transitions (not hypergraphs) will solve wildcard problem at higher abstraction level — not a P2 concern.
-
----
-
-## Next session task
-
-**Write tests.** This will immediately surface whether _apply_pass handles node mapping correctly for the new transition graphs. Start with:
-1. add_init_00 end-to-end — simplest rule, validates the full apply() pipeline
-2. bit_add_01_c0 — validates position advance and result tagging
-3. add_finalise_00_c0 — validates op node recycling
-4. One seed rule — validates survivor node reattachment via step 6
-
-All 9 old tests are broken — rewrite against new schema after the above validate.
-
----
-
-## Open questions
-- Verify operand left/right order survives match() permutation — critical before subtraction rules
-- Wildcard matching deferred to layer transition design
-- Hyperedges deferred to P6
-- match() is O(n!) — acceptable for prototype, flagged for P6 profiling
-
----
-
-## Architecture essentials
-
-**Two systems:**
-- Data Transformation System — traverses representation space using reversible graph rules.
-- Logic Rewriting System — improves rules using GA. Fitness: label-conditioned reproducibility.
-
-**Substrate:** Directed graphs, binary edge types (structural / operational). No node attributes, no weights.
-
-**Upgrade paths:** Hypergraphs, weighted graphs — named but deferred.
-
-**Layer types:**
-- Within-layer: same abstraction level (e.g. `3+4 → 7`)
-- Layer transition: changes abstraction level
-
-**Test sequence (planned):** Arithmetic equation solving → Symbol finding in pictures → further tests → meta-level scope increase.
-
----
-
-## Communication rules
-- No softening — name errors directly
-- Default: user is competent
-- No praise unless genuinely non-obvious
-- Useful over agreeable
-- Flag tentative positions before stating as conclusions
-
----
-
-## Mobile workflow
-- No KB writes on mobile — note decisions, push from PC
-- No code implementation on mobile — describe intent, implement on PC
-- End of session: list decisions for PC push
-
----
-
-## Next session start prompt
-Paste this file and add:
-> "No GitHub access. Mobile session. [your question or task]"
->
->
-Session 2026-05-20 summary — add to P2 status:
-Engine (operations.py) significantly reworked:
-
-Step 1 now converts strip_type edges to output_type (not removes) to preserve structural context for matching
-Step 2 identifies output-only nodes as has_incoming - has_outgoing strip_type edges
-Step 3 builds input subgraph excluding output-only nodes, strips strip_type edges for matching
-Seed loop seeds all non-output-only matched nodes
-
-Arithmetic (arithmetic.py):
-
-add_init pattern has no parents — correct
-bit_add, drain, add_finalise patterns use _add_finished_op_node — correct
-add_init g2s uses _add_finished_op_node + OPERATIONAL scaffold — partially working
-
-13/33 tests passing. Open problems:
-
-add_init g2s — op cycle nodes are deleted instead of surviving. Transition needs explicit input→output node pairs for all surviving nodes, not just OPERATIONAL scaffold. The cycle nodes have no OPERATIONAL edges mapping them to output counterparts.
-bit_add/drain/add_finalise patterns fail — consequence of problem 1 (op has no cycle after add_init fires)
-tombstone_gc — parent not removed, child not getting tombstone
-Seed loop if t_input in has_outgoing may need if t_input not in output_only once problem 1 fixed — but that caused regressions this session
-
-Next session priority: Fix add_init g2s with proper input→output node pairs for all surviving structure. Verify cycle survives. Then check bit_add/drain/finalise cascade.
+## Session start without KB access
+1. Say so, and that you're working from this file's snapshot.
+2. Ask Sven for the live state of whatever you're touching.
+3. Log every decision for KB push at session end.
