@@ -1,116 +1,90 @@
 # Perspective
 
-Sorry this was Ai drafted and is still not completely right
+**What if representation weren't a byproduct of learning, but the thing being
+built?**
 
-**A system that explores representation space explicitly, instead of learning a
-representation as a byproduct of optimization — with arithmetic as the current
-proving ground, not the goal.**
-
-Most machine learning treats representation as something a model backs into while
-optimizing for a task. Perspective inverts that: representation *is* the object
-being built and searched over. Everything else — including the arithmetic engine
-that currently lives in this repo — exists to test whether a given representation
-holds up.
+Neural networks learn representations implicitly — buried in weights, shaped as a
+side effect of optimizing something else, unreadable from the outside and fragile
+under change. Perspective is an attempt to do the opposite: make representation an
+explicit, inspectable structure — a graph — and make *traversal of representation
+space* the primary mechanism, not an emergent accident.
 
 ---
 
-## The core idea
+## The founding problem
 
-A number isn't stored as an integer here — it's encoded as a small graph: a chain of
-nodes (a **spine**) ending in leaves that carry bit values. Two numbers linked at an
-operator node form the input to an operation. Computing `a + b` doesn't mean
-evaluating anything in the traditional sense — it means searching the graph for a
-**subgraph isomorphism** (via a VF2-based matcher) that matches the left-hand side of
-some known rule, then rewriting that region into the rule's right-hand side. Do this
-enough times and the graph settles into a new spine: the result.
+Perspective began with an artificial-life game — hand-crafting organisms, including
+their neural networks. Eyes took input from four directions; the genetic
+representation allowed axons to be coded with rotational symmetry across all four,
+but not dendrites. A technique for tunable excitation levels was discovered by
+looping tendrils back on themselves — but because the directional asymmetry had to
+be encoded separately from the rest of the structure, the design broke easily under
+mutation.
 
-Arithmetic is the **test domain**, not the point. The original test domain was
-actually MNIST digit recognition — arithmetic replaced it because it has a
-known-correct ground truth you can check a representation against unambiguously.
-Addition is built and validated (213 confirmed `bit_add` rules); subtraction is under
-active construction.
+That was the real discovery: **the genetic algorithm didn't fail to find the
+solution. A human found it, and the GA couldn't keep it.** Representation determines
+what evolution can *maintain*, not just what it can search for. A bad representation
+doesn't merely search slowly — it actively destroys solutions that exploit structure
+the representation itself doesn't respect.
 
-## Why this way: the actual target
+Perspective is the generalized answer to that problem: build a substrate where
+knowledge is encoded so that what is found — by a human or by the system — survives
+being operated on.
 
-The bigger design is a **Representation Space Traversal Architecture**: two systems
-sharing a library. A *Data Transformation System* — the **traveler** — explores
-representation space directly, growing structure and looking for matches rather than
-optimizing a fixed objective. A *Logic Rewriting System* improves the traveler's own
-rules over time via a genetic algorithm operating on rule graphs, not on data.
+## The architecture
 
-The exploration model (internally called the **Quantum Traveler**) doesn't search
-for *a* path — it grows a population of structures in parallel, branching like moss
-through representation space. Branches that explode structurally get pruned; branches
-that dead-end just stop, cheaply, no backtracking; a branch that reaches the target
-cleanly exits and becomes a strong fitness signal for the rules that got it there.
+Everything in Perspective is a graph, and everything that happens to a graph is a
+**rewrite**: match a pattern (by subgraph isomorphism), transform it by rule. That
+uniformity is the load-bearing choice — data, the rules that transform data, and
+eventually the histories of those transformations all live in the same formalism,
+so the same machinery can operate on all of them.
 
-The endpoint vision is self-similar: a **traveler** explores representation space, an
-**overseer** manages a population of travelers and reads their paths as data to
-direct the population, a **senior overseer** does the same one level up for
-overseers, and a **human** holds a deliberately non-automated threshold gate — the
-system doesn't get to decide for itself when it's ready to advance. The same graph
-matching and rewriting machinery runs at every one of those levels.
+Two systems share a library:
 
-## Rules that write rules
+- **The traveler** (Data Transformation System) explores representation space
+  directly. It doesn't optimize toward a fixed objective — it *grows*: a population
+  of structures branching in parallel, like moss, through the space of possible
+  representations. Branches that structurally explode get pruned. Branches that
+  dead-end simply stop — cheap, no backtracking. A branch that reaches its target
+  exits early, and its path becomes a strong fitness signal for the rules that
+  produced it. The system is not searching for a path; it is growing until
+  something matches.
 
-The rule library for arithmetic is hand-built today. The design target is a genetic
-algorithm that generates new rules itself — recombining a donor rule's input pattern
-with another donor's output pattern, then repairing the connecting mapping between
-them by mutation (mutation is a repair operator here, not a rival generator). Its
-search target, in the arithmetic domain, is solving equations down to `x = number`,
-with commutation and rearrangement as required waypoints, not the objective itself.
+- **The rewriter** (Logic Rewriting System) improves the traveler's own rules. Rules
+  are first-class graph objects — they can be inspected, recombined, and mutated by
+  a genetic algorithm operating on rule structure itself. Moves through
+  representation space split into two kinds: *upward* moves that lose information
+  and must preserve correctness, and *sideways* moves — reversible re-encodings —
+  that owe correctness nothing and only have to prove they can be undone. Sideways
+  moves are how alternate representations get explored at all; reversibility is
+  what makes them safe.
 
-Legality for a GA-generated move splits by reversibility. An *irreversible* (upward)
-move has to preserve correctness against a fixed, known-correct arithmetic reducer.
-A *reversible* (sideways) move only has to prove it's invertible — cheaper, and it's
-allowed to produce encodings the reducer can't even process, because sideways moves
-are exactly how alternate representations get explored. Sideways moves don't make
-direct progress toward a solution, so they're scored indirectly: rewind the sideways
-step after a following upward move, and score the combined path in the reducer — this
-is exact whenever the sideways move's inverse still applies after the upward step.
+## The endpoint
 
-Perspective's reversibility classifier — which determines whether a rule can run
-backwards as a valid rule in its own right, purely from what crosses its boundary —
-is what makes the "sideways" half of that split checkable at all, rather than assumed.
+The mature form is self-similar. A **traveler** explores representation space. An
+**overseer** manages a population of travelers, reading their travel paths *as
+data* — with the same matching machinery — to direct the population. A **senior
+overseer** does the same one level up, managing overseers and searching for its own
+successor. And a **human** holds a deliberately non-automated threshold gate: the
+system never decides for itself when it is ready to advance.
 
-## What's built vs. what's designed
+Travel paths are first-class data, encoded in the same formalism as everything
+else. That is why the levels can stack: the input at every level is always graphs
+and transition graphs, so one mechanism serves every scale.
 
-| Area | State |
-|---|---|
-| Addition (spine graphs, bit rules) | Built and validated — 213 confirmed `bit_add` rules |
-| Subtraction | Init-stage rules validated; full bit-level build in progress |
-| Reversibility classifier | Designed and implemented; confirmed against a real production rule |
-| GA architecture (search target, legality, generator, recombination, fitness) | Designed (five-node model); implementation not started |
-| Traveler / overseer / senior-overseer levels | Long-term architecture; not built |
+## Where it stands
 
-## The origin story
-
-Perspective didn't start as an arithmetic engine. It started with an artificial-life
-game — hand-crafting organisms, including their neural networks, by hand. Eyes took
-input from four directions, and the genetic representation let axons be coded with
-rotational symmetry across all four — but not dendrites. A technique for tunable
-excitation levels was discovered by looping tendrils back on themselves, but because
-the directional asymmetry had to be encoded separately from the rest of the
-structure, the design broke easily under mutation.
-
-That was the real discovery, and it had nothing to do with arithmetic: **the GA
-didn't fail to find the solution. A human found it, and the GA couldn't preserve
-it.** Representation determines what a genetic algorithm can *maintain*, not just
-what it can search for. A bad representation doesn't just search slowly — it
-actively destroys solutions that exploit structure the representation itself
-doesn't respect.
-
-Perspective is the answer to that problem, generalized. Arithmetic is the proving
-ground, not the point: it's a domain with a known-correct ground truth, so you can
-tell, unambiguously, whether a representation choice holds up. Every encoding
-decision in this repo — unique cycle sizes per operator, uniform anchors regardless
-of state, marker chains instead of overloaded edges — exists to produce a
-representation where hand-crafted, correct-by-construction rules are
-*mutation-stable by design*. The goal is a substrate where a GA, once it's finally
-turned loose on it, finds solutions the way a human did — and, unlike that first
-alife game, doesn't tear them apart the moment it starts mutating.
+The substrate has to be proven before anything can be trusted to grow on it. The
+current proving ground is deliberately humble: domains with known-correct ground
+truth — arithmetic, for instance — where you can tell *unambiguously* whether a
+representation choice holds up, whether a hand-crafted rule is
+correct-by-construction, and whether it stays correct when operated on. Every
+encoding decision at this stage exists to make found solutions mutation-stable by
+design — so that when the system finally does its own finding, it doesn't tear its
+discoveries apart the way that first alife game did.
 
 ---
 
-*Perspective is designed and built by Sven ([welwordion-sys](https://github.com/welwordion-sys)).
-Design decisions and rationale are tracked in a project knowledge base alongside the code.*
+*Perspective is designed and built by Sven
+([welwordion-sys](https://github.com/welwordion-sys)). Design decisions and their
+rationale are tracked in a project knowledge base alongside the code.*
