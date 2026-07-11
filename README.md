@@ -1,5 +1,7 @@
 # Perspective
 
+Sorry this was Ai drafted and is still not completely right
+
 **A system that explores representation space explicitly, instead of learning a
 representation as a byproduct of optimization — with arithmetic as the current
 proving ground, not the goal.**
