@@ -101,6 +101,20 @@ def dump_tree(tree: CoreTree, rule_names: list[str], path: str) -> None:
                      for nm, m in tree._rule_map.items()},
         "rule_edges": {nm: [list(e) for e in es]
                        for nm, es in tree._rule_edges.items()},
+        # _rule_delta MUSS gespeichert werden, nicht beim Laden abgeleitet.
+        # Es ist zwar fuer 251/252 Regeln exakt aus _rule_map + _rule_edges
+        # rekonstruierbar — aber NICHT fuer alle: eine Regel, die als erste in
+        # einen (Teil-)Baum eingefuegt wird, bekommt in CoreTree.insert direkt
+        # ({}, 0.0, set()) zugewiesen, ohne _update_delta_info zu durchlaufen.
+        # _compute_delta_info liefert fuer dieselbe leere core_node_set aber
+        # ratio=1.0 (alles ist Delta). Ableitung wuerde diesen Knoten also
+        # still von 0.0 auf 1.0 aendern — und ratio steuert, ob eine Regel in
+        # cross_reference() beruecksichtigt wird (>= cross_ref_min_delta).
+        # Gemessen an add_finalise_1bit: 251/252 rekonstruierbar, 1 nicht.
+        "rule_delta": {nm: [[[k, list(v)] for k, v in fp.items()],
+                            ratio,
+                            sorted(cns)]
+                       for nm, (fp, ratio, cns) in tree._rule_delta.items()},
     }
     tmp = path + ".tmp"
     with open(tmp, "w") as f:
@@ -148,6 +162,13 @@ def load_tree(path: str, rule_names: list[str]) -> CoreTree | None:
                    for nm, pairs in blob["rule_map"].items()}
     t._rule_edges = {nm: [tuple(e) for e in es]
                      for nm, es in blob["rule_edges"].items()}
+    t._rule_delta = {nm: ({k: tuple(v) for k, v in fp},
+                          ratio,
+                          set(cns))
+                     for nm, (fp, ratio, cns) in blob["rule_delta"].items()}
+    # _pairwise und _delta_cache werden bewusst NICHT gespeichert: reine
+    # Caches, die sich bei Bedarf neu fuellen. _rule_delta ist kein Cache,
+    # sondern Zustand aus dem Insert-Pfad (s.o.).
     return t
 
 
@@ -216,6 +237,23 @@ def _main():
     # 2. rule_map identisch?
     assert built._rule_map == loaded._rule_map, "_rule_map WEICHT AB"
     print(f"ok: _rule_map identisch ({len(loaded._rule_map)} regeln)")
+
+    # 2b. _rule_delta identisch? (kein Cache — Zustand aus dem Insert-Pfad)
+    assert built._rule_delta == loaded._rule_delta, "_rule_delta WEICHT AB"
+    print(f"ok: _rule_delta identisch ({len(loaded._rule_delta)} regeln)")
+
+    # 2c. cross_reference() muss auf beiden Baeumen dasselbe tun.
+    #     Genau hier schlug die Ableitungs-Variante fehl: eine Regel mit leerem
+    #     _rule_map bekommt im Insert-Pfad ratio=0.0, abgeleitet waere es 1.0 —
+    #     und ratio entscheidet ueber Teilnahme an cross_reference.
+    import copy
+    b2 = build_dispatch_tree(ADD)
+    l2 = load_tree(path, ADD)
+    n_b = b2.cross_reference()
+    n_l = l2.cross_reference()
+    assert n_b == n_l, f"cross_reference WEICHT AB: built={n_b} loaded={n_l}"
+    assert _shape(b2.root) == _shape(l2.root), "baeume divergieren NACH cross_reference"
+    print(f"ok: cross_reference identisch ({n_b} entdeckungen, struktur danach gleich)")
 
     # 3. parent-links rekonstruiert?
     def chk_parent(n, exp):
