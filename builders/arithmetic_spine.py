@@ -54,14 +54,13 @@ def _build_finalise_2bit() -> OperationDefinition:
     p.add_edge(r_lsb, r_msb, EdgeType.STRUCTURAL)   # direct adjacency — 2-node discriminator
     p.add_edge(r_msb, buffer, EdgeType.STRUCTURAL)
     p.add_edge(r_lsb, buffer, EdgeType.OPERATIONAL)  # LSB readback anchor
-    # MSB leaf matched inside the window as a 1-bit (structural self-loop = value 1)
-    r_msb_leaf = p.add_node()
-    p.add_edge(r_msb_leaf, r_msb_leaf, EdgeType.STRUCTURAL)  # bit value 1
-    p.add_edge(r_msb, r_msb_leaf, EdgeType.OPERATIONAL)      # spine -> leaf
+    # Fix (a): MSB leaf is NOT in the pattern; r_msb's own (OP,out) to its
+    # unmatched leaf is declared as an external boundary crossing, so the real
+    # leaf survives the rewrite untouched (same shape as F1).
     specs = {
         handle: [(EdgeType.OPERATIONAL, 'in')],
         r_lsb:  [(EdgeType.OPERATIONAL, 'out')],
-        # r_msb: no crossing — MSB leaf is now internal
+        r_msb:  [(EdgeType.OPERATIONAL, 'out')],
     }
     g2, nm, ph = SM._typed_input_graph(p, specs)
     in_handle = nm[handle]; in_r_lsb = nm[r_lsb]; in_r_msb = nm[r_msb]
