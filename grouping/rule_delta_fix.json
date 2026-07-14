@@ -1,0 +1,302 @@
+{
+  "stage": "committed",
+  "goals": {
+    "g1": "Schliesse die gefilte _rule_delta-Luecke im Serialisierungsformat und korrigiere ans_format, das den geladenen Baum als konsumenten-treu bezeichnete."
+  },
+  "prep_note": "Falsifier k_f_ans hatte die Luecke gefiled; Sven: fixen.",
+  "prior_candidates": [
+    {
+      "reg_id": "tree_store_format.json::ans_format",
+      "claim_id": "ans_format",
+      "statement": "Das Format speichert children als geordnete typisierte Sequenz, weil die Node/String-Verschraenkung (Pattern NNSNNSSSNNSS) Einfuegereihenfolge ist und aus getrennten Mengen nicht rekonstruierbar; _find_and_try liest diese Reihenfolge und sperrt via visited, weshalb Umsortierung 4/25 Dispatch-Mismatches erzeugt. Invalidierung ueber sha256(Namen + Kantenmuster) statt nur Namen, weil eine Regel unter gleichem Namen ihr Muster aendern kann. JSON statt pickle, weil der Baum vollstaendig primitiv ist. Der Aequivalenztest muss ordnungssensitiv sein UND echtes Dispatch vergleichen — der erste _shape war blinder als sein Konsument und meldete PASS auf einem defekten Baum. Gewinn: 3.34s build -> 0.463s load.",
+      "status": "derived",
+      "negation_handling": null,
+      "derived_from": [
+        {
+          "parents": [
+            "g_order",
+            "g_shape_blind",
+            "g_pure2",
+            "ans_retract"
+          ],
+          "rule": "Ein Serialisierungsformat ist genau dann korrekt, wenn es jede Eigenschaft erhaelt, auf die ein Konsument reagiert — Mengengleichheit genuegt nicht, wenn der Konsument die Reihenfolge liest."
+        }
+      ],
+      "source_path": "tree_store_format.json",
+      "goals": [
+        "Gate das Serialisierungsformat von tree_store.py (children-Reihenfolge als Strukturbestandteil, Ruleset-Fingerprint als Invalidierung) bevor kuenftige Sessions es erben.",
+        "Ziehe den auf falscher Grundlage committeten Befund ans_core_dominates zurueck."
+      ]
+    },
+    {
+      "reg_id": "grouping_memo_build.json::ans_core_dominates",
+      "claim_id": "ans_core_dominates",
+      "statement": "Der Core-Match IST memoisierbar (die Vorturn-Rivalitaet war ein Kategorienfehler), und die leere Zelle ist jetzt gefuellt: grouped+memo ist 25x LANGSAMER als flat+memo (4.913s vs 0.197s) bei identischer Aequivalenz und unveraendertem consistent-Ratio 1.03x. g_structs Core-Identitaets-Garantie ist strukturell echt, liefert aber nur 395 eingesparte consistent-Calls, waehrend die 689 dafuer noetigen find_core-Subgraphsuchen ~4.7s kosten. Auf memoisierter Baseline ist der Core-Match selbst der Kostentreiber, nicht das Backtracking, das er ersetzen soll. Grouping-fuer-Dispatch ist auf diesem Workload widerlegt; die Memoisierung allein (95x gegen flat_raw) ist die tragende Optimierung.",
+      "status": "derived",
+      "negation_handling": null,
+      "derived_from": [
+        {
+          "parents": [
+            "g_empty",
+            "g_struct",
+            "g_lic",
+            "a_num"
+          ],
+          "rule": "Wenn die Ersparnis eines Mechanismus (geteilte Bindungen: 395 consistent-Calls) um zwei Groessenordnungen unter seinen Kosten liegt (689 Core-Suchen, ~4.7s), ist der Mechanismus auf diesem Workload nicht tragfaehig — unabhaengig davon, ob seine Garantie strukturell echt ist."
+        }
+      ],
+      "source_path": "grouping_memo_build.json",
+      "goals": [
+        "Entscheide, ob grouped+memo (mit memoisiertem Core-Match) gegen flat+memo gebaut und gemessen werden soll, oder ob eine Vorbedingung das blockiert.",
+        "Korrigiere die Scheinalternative 'Core-Match gegen memoisiertem Lookup' aus dem Vorturn."
+      ]
+    },
+    {
+      "reg_id": "tree_store_format.json::ans_retract",
+      "claim_id": "ans_retract",
+      "statement": "ans_core_dominates wird ZURUECKGEZOGEN. Die gemessenen 25x stammten daraus, dass find_core (ein MCS-Konstruktionsverfahren) 689 mal im Dispatch-Pfad lief, um ein bereits bekanntes Muster neu zu entdecken. Das misst meinen Bau, nicht Grouping. Ob Grouping mit einem echten Core-Match gewinnt, ist UNGEMESSEN — nicht widerlegt.",
+      "status": "derived",
+      "negation_handling": null,
+      "derived_from": [
+        {
+          "parents": [
+            "prior_ans",
+            "g_mcs",
+            "g_known"
+          ],
+          "rule": "Ein Messergebnis, das aus dem Aufruf eines Konstruktionsverfahrens zur Laufzeit stammt, misst den Aufruf, nicht den Mechanismus; es traegt keine Aussage ueber den Mechanismus."
+        }
+      ],
+      "source_path": "tree_store_format.json",
+      "goals": [
+        "Gate das Serialisierungsformat von tree_store.py (children-Reihenfolge als Strukturbestandteil, Ruleset-Fingerprint als Invalidierung) bevor kuenftige Sessions es erben.",
+        "Ziehe den auf falscher Grundlage committeten Befund ans_core_dominates zurueck."
+      ]
+    },
+    {
+      "reg_id": "tree_store_format.json::g_order",
+      "claim_id": "g_order",
+      "statement": "Gemessen: _find_and_try laeuft node.children in Reihenfolge ab und sperrt jede besuchte Regel im visited-Set. Eine Serialisierung, die children nach Typ umsortiert (erst CoreNodes, dann Strings), erzeugt 4/25 Dispatch-Mismatches bei identischer Menge, identischem _rule_map und identischen Fingerprints.",
+      "status": "given",
+      "negation_handling": null,
+      "derived_from": null,
+      "source_path": "tree_store_format.json",
+      "goals": [
+        "Gate das Serialisierungsformat von tree_store.py (children-Reihenfolge als Strukturbestandteil, Ruleset-Fingerprint als Invalidierung) bevor kuenftige Sessions es erben.",
+        "Ziehe den auf falscher Grundlage committeten Befund ans_core_dominates zurueck."
+      ]
+    },
+    {
+      "reg_id": "grouping_memo_build.json::g_empty",
+      "claim_id": "g_empty",
+      "statement": "Die offene Groesse ist die leere Zelle 'grouped+memo' — nie gemessen. flat+roh, flat+memo, grouped+roh liegen (als Arbeitshypothese) vor.",
+      "status": "derived",
+      "negation_handling": null,
+      "derived_from": [
+        {
+          "parents": [
+            "prior_rivalry",
+            "g_lic"
+          ],
+          "rule": "Wenn beide Arme memoisierbar sind, ist die offene Groesse keine Rivalitaet sondern eine leere Zelle in der Kreuztabelle roh-x-memoisiert."
+        }
+      ],
+      "source_path": "grouping_memo_build.json",
+      "goals": [
+        "Entscheide, ob grouped+memo (mit memoisiertem Core-Match) gegen flat+memo gebaut und gemessen werden soll, oder ob eine Vorbedingung das blockiert.",
+        "Korrigiere die Scheinalternative 'Core-Match gegen memoisiertem Lookup' aus dem Vorturn."
+      ]
+    }
+  ],
+  "claims": {
+    "prior_format": {
+      "id": "prior_format",
+      "statement": "Das Format erhaelt jede Eigenschaft, auf die ein Konsument reagiert (geprueft: dispatch/_find_and_try).",
+      "status": "assumed",
+      "derived_from": null,
+      "antecedents": null,
+      "negation_handling": "checked",
+      "negation_note": "Der geladene Baum war NICHT treu: _rule_delta fehlte (252 vs 0), cross_reference() machte darauf 36 statt 10 Entdeckungen. Fuer dispatch() folgenlos, fuer cross_reference() nicht.",
+      "revises": null
+    },
+    "g_251": {
+      "id": "g_251",
+      "statement": "Gemessen: _rule_delta ist fuer 251/252 Regeln exakt aus _rule_map + _rule_edges rekonstruierbar. Genau eine Regel (add_finalise_1bit) weicht ab.",
+      "status": "given",
+      "derived_from": null,
+      "antecedents": null,
+      "negation_handling": null,
+      "negation_note": "",
+      "revises": null
+    },
+    "g_insert": {
+      "id": "g_insert",
+      "statement": "Code-Fakt: CoreTree.insert setzt beim Erstinsert _rule_delta[name] = ({}, 0.0, set()) DIREKT, ohne _update_delta_info. _compute_delta_info liefert fuer dieselbe leere core_node_set ratio=1.0. Ableitung wuerde 0.0 still zu 1.0 machen.",
+      "status": "given",
+      "derived_from": null,
+      "antecedents": null,
+      "negation_handling": null,
+      "negation_note": "",
+      "revises": null
+    },
+    "g_ratio_used": {
+      "id": "g_ratio_used",
+      "statement": "Code-Fakt: cross_reference() filtert Regeln mit _rule_delta[name][1] >= cross_ref_min_delta. ratio ist also verhaltenswirksam, kein Metadatum.",
+      "status": "given",
+      "derived_from": null,
+      "antecedents": null,
+      "negation_handling": null,
+      "negation_note": "",
+      "revises": null
+    },
+    "g_xref": {
+      "id": "g_xref",
+      "statement": "Gemessen: cross_reference() auf gebautem Baum 10 Entdeckungen, auf geladenem OHNE _rule_delta 36. Nach dem Fix (speichern statt ableiten): beide 10, Struktur danach identisch.",
+      "status": "given",
+      "derived_from": null,
+      "antecedents": null,
+      "negation_handling": null,
+      "negation_note": "",
+      "revises": null
+    },
+    "ans_store": {
+      "id": "ans_store",
+      "statement": "_rule_delta wird gespeichert, nicht abgeleitet. Es ist zu 251/252 rekonstruierbar, aber der Erstinsert-Pfad setzt es direkt auf ({},0.0,set()), waehrend die Ableitung ratio=1.0 liefert — und ratio steuert die Teilnahme an cross_reference(). _pairwise/_delta_cache bleiben ungespeichert: echte Caches ohne eigenen Setzpfad. Der Konsumenten-Test muss ALLE Konsumenten umfassen, nicht nur den, den man gerade baut: dispatch() war blind gegen diese Luecke, cross_reference() nicht.",
+      "status": "derived",
+      "derived_from": [
+        {
+          "parents": [
+            "g_251",
+            "g_insert",
+            "g_ratio_used",
+            "g_xref",
+            "prior_format"
+          ],
+          "rule": "Ein Zustand ist genau dann ableitbar statt speicherbar, wenn KEIN Pfad ihn ausserhalb der ableitenden Funktion setzt. Ein einziger Sonderpfad genuegt, um Ableitung zu disqualifizieren — 251/252 ist kein Argument, sondern eine Falle."
+        }
+      ],
+      "antecedents": null,
+      "negation_handling": null,
+      "negation_note": "",
+      "revises": {
+        "target": "prior_format",
+        "prior_text": "Das Format erhaelt jede Eigenschaft, auf die ein Konsument reagiert (geprueft: dispatch/_find_and_try).",
+        "why": "Nur dispatch war geprueft. cross_reference() ist ein zweiter Konsument und war divergent (36 vs 10) — 'jede Eigenschaft' war ungedeckt."
+      }
+    }
+  },
+  "candidates": {
+    "c_store": {
+      "id": "c_store",
+      "statement": "_rule_delta speichern.",
+      "discriminator": "Konkurriert gegen c_derive (beim Laden aus _rule_map+_rule_edges ableiten — spart 24 KB). Unterscheidende Evidenz: g_insert zeigt den Sonderpfad, an dem Ableitung 0.0->1.0 kippt."
+    },
+    "c_derive": {
+      "id": "c_derive",
+      "statement": "_rule_delta beim Laden ableiten, kein zusaetzlicher Speicher.",
+      "discriminator": "Gewinnt, falls die Ableitung fuer ALLE Regeln exakt ist."
+    }
+  },
+  "checks": {
+    "k_f": {
+      "id": "k_f",
+      "kind": "falsifier",
+      "target": "c_store",
+      "method": "Head-to-head gegen c_derive: rekonstruiere _rule_delta fuer alle 252 Regeln aus _rule_map+_rule_edges und vergleiche mit dem gebauten Zustand.",
+      "result": "251/252 exakt, 1 Abweichung (add_finalise_1bit: gespeichert ratio=0.0, abgeleitet 1.0, delta_fp verschieden). c_derive falsifiziert. Haette ich nur stichprobenartig geprueft, waere ein stilles Format-Leck ausgeliefert worden.",
+      "outcome": "survived",
+      "side_findings": [
+        {
+          "finding": "Das Format waechst um ~24 KB (181.8 -> 205.2 KB) fuer eine einzige nicht-rekonstruierbare Regel. Akzeptiert: Korrektheit vor Groesse.",
+          "disposition": "carried"
+        }
+      ]
+    },
+    "k_f2": {
+      "id": "k_f2",
+      "kind": "falsifier",
+      "target": "ans_store",
+      "method": "Gibt es einen DRITTEN Konsumenten, der noch immer divergiert?",
+      "result": "Ueberlebt nur eng. Geprueft sind jetzt dispatch() und cross_reference(). _propagate_discovery/_lift_prior_into_subgroup sind ueber cross_reference erreichbar und damit indirekt abgedeckt (Struktur nach cross_reference identisch). NICHT geprueft: _get_pairwise/_transitivity_bound als Direkteinstieg. Die Aussage 'alle Konsumenten' bleibt ungedeckt; belegt ist 'die zwei erreichbaren Einstiegspunkte'.",
+      "outcome": "survived",
+      "side_findings": [
+        {
+          "finding": "_get_pairwise/_transitivity_bound als Direkteinstieg auf geladenem Baum ungetestet.",
+          "disposition": "filed"
+        }
+      ]
+    },
+    "k_o": {
+      "id": "k_o",
+      "kind": "obligation",
+      "target": "ans_store",
+      "method": "o_allcons: cross_reference() auf beiden Baeumen.",
+      "result": "10 == 10 Entdeckungen, _shape danach identisch, _rule_delta 252==252, dispatch 25 states 0 mismatches.",
+      "outcome": "survived",
+      "side_findings": null
+    },
+    "k_rel": {
+      "id": "k_rel",
+      "kind": "relevance",
+      "target": "ans_store",
+      "method": "I9: bindet Evidenz ans Ziel (Luecke schliessen + ans_format korrigieren).",
+      "result": "Luecke geschlossen (g_xref: 36->10), ans_format via I8 revidiert mit woertlichem Zitat. Die verallgemeinerte Regel (ein Sonderpfad disqualifiziert Ableitung) ist das, was eine kuenftige Session erbt.",
+      "outcome": "survived",
+      "side_findings": null
+    }
+  },
+  "obligations": {
+    "id": "statement"
+  },
+  "committed": {
+    "answer": "ans_store",
+    "statement": "_rule_delta wird gespeichert, nicht abgeleitet. Es ist zu 251/252 rekonstruierbar, aber der Erstinsert-Pfad setzt es direkt auf ({},0.0,set()), waehrend die Ableitung ratio=1.0 liefert — und ratio steuert die Teilnahme an cross_reference(). _pairwise/_delta_cache bleiben ungespeichert: echte Caches ohne eigenen Setzpfad. Der Konsumenten-Test muss ALLE Konsumenten umfassen, nicht nur den, den man gerade baut: dispatch() war blind gegen diese Luecke, cross_reference() nicht.",
+    "evidence_label": "assumed",
+    "assumptions_carried": [
+      "prior_format"
+    ],
+    "carried_unexplored": []
+  },
+  "call_log": [
+    [
+      "ground",
+      [
+        "prior_format",
+        "g_251",
+        "g_insert",
+        "g_ratio_used",
+        "g_xref",
+        "ans_store"
+      ]
+    ],
+    [
+      "oblige",
+      [
+        {
+          "id": "o_allcons",
+          "statement": "Alle Konsumenten des Baums, nicht nur der gerade gebaute, muessen gegen den geladenen Baum getestet sein."
+        }
+      ]
+    ],
+    [
+      "propose",
+      [
+        "c_store",
+        "c_derive"
+      ]
+    ],
+    [
+      "check",
+      [
+        "k_f",
+        "k_f2",
+        "k_o",
+        "k_rel"
+      ]
+    ],
+    [
+      "commit",
+      "ans_store"
+    ]
+  ]
+}

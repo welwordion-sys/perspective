@@ -1,0 +1,374 @@
+{
+  "stage": "committed",
+  "goals": {
+    "g1": "Gate das Serialisierungsformat von tree_store.py (children-Reihenfolge als Strukturbestandteil, Ruleset-Fingerprint als Invalidierung) bevor kuenftige Sessions es erben.",
+    "g2": "Ziehe den auf falscher Grundlage committeten Befund ans_core_dominates zurueck."
+  },
+  "prep_note": "Sven: erst gaten was gegatet gehoert; world model waehrend des prozesses fuehren.",
+  "prior_candidates": [
+    {
+      "reg_id": "grouping_memo_build.json::ans_core_dominates",
+      "claim_id": "ans_core_dominates",
+      "statement": "Der Core-Match IST memoisierbar (die Vorturn-Rivalitaet war ein Kategorienfehler), und die leere Zelle ist jetzt gefuellt: grouped+memo ist 25x LANGSAMER als flat+memo (4.913s vs 0.197s) bei identischer Aequivalenz und unveraendertem consistent-Ratio 1.03x. g_structs Core-Identitaets-Garantie ist strukturell echt, liefert aber nur 395 eingesparte consistent-Calls, waehrend die 689 dafuer noetigen find_core-Subgraphsuchen ~4.7s kosten. Auf memoisierter Baseline ist der Core-Match selbst der Kostentreiber, nicht das Backtracking, das er ersetzen soll. Grouping-fuer-Dispatch ist auf diesem Workload widerlegt; die Memoisierung allein (95x gegen flat_raw) ist die tragende Optimierung.",
+      "status": "derived",
+      "negation_handling": null,
+      "derived_from": [
+        {
+          "parents": [
+            "g_empty",
+            "g_struct",
+            "g_lic",
+            "a_num"
+          ],
+          "rule": "Wenn die Ersparnis eines Mechanismus (geteilte Bindungen: 395 consistent-Calls) um zwei Groessenordnungen unter seinen Kosten liegt (689 Core-Suchen, ~4.7s), ist der Mechanismus auf diesem Workload nicht tragfaehig — unabhaengig davon, ob seine Garantie strukturell echt ist."
+        }
+      ],
+      "source_path": "grouping_memo_build.json",
+      "goals": [
+        "Entscheide, ob grouped+memo (mit memoisiertem Core-Match) gegen flat+memo gebaut und gemessen werden soll, oder ob eine Vorbedingung das blockiert.",
+        "Korrigiere die Scheinalternative 'Core-Match gegen memoisiertem Lookup' aus dem Vorturn."
+      ]
+    },
+    {
+      "reg_id": "grouping_memo_build.json::g_lic",
+      "claim_id": "g_lic",
+      "statement": "World-Model: 'memoisierbar' propagiert entlang 'ist-reine-funktion-von' auf derive_match_view, core_pattern UND core_match_ergebnis. degree_index ueber States ist INERT (unlizenziert).",
+      "status": "given",
+      "negation_handling": null,
+      "derived_from": null,
+      "source_path": "grouping_memo_build.json",
+      "goals": [
+        "Entscheide, ob grouped+memo (mit memoisiertem Core-Match) gegen flat+memo gebaut und gemessen werden soll, oder ob eine Vorbedingung das blockiert.",
+        "Korrigiere die Scheinalternative 'Core-Match gegen memoisiertem Lookup' aus dem Vorturn."
+      ]
+    },
+    {
+      "reg_id": "grouping_memo_build.json::prior_rivalry",
+      "claim_id": "prior_rivalry",
+      "statement": "Die ungemessene Groesse ist 'Core-Match gegen memoisiertem Lookup' — eine Rivalitaet zweier Mechanismen.",
+      "status": "assumed",
+      "negation_handling": "checked",
+      "derived_from": null,
+      "source_path": "grouping_memo_build.json",
+      "goals": [
+        "Entscheide, ob grouped+memo (mit memoisiertem Core-Match) gegen flat+memo gebaut und gemessen werden soll, oder ob eine Vorbedingung das blockiert.",
+        "Korrigiere die Scheinalternative 'Core-Match gegen memoisiertem Lookup' aus dem Vorturn."
+      ]
+    },
+    {
+      "reg_id": "grouping_memo_build.json::g_empty",
+      "claim_id": "g_empty",
+      "statement": "Die offene Groesse ist die leere Zelle 'grouped+memo' — nie gemessen. flat+roh, flat+memo, grouped+roh liegen (als Arbeitshypothese) vor.",
+      "status": "derived",
+      "negation_handling": null,
+      "derived_from": [
+        {
+          "parents": [
+            "prior_rivalry",
+            "g_lic"
+          ],
+          "rule": "Wenn beide Arme memoisierbar sind, ist die offene Groesse keine Rivalitaet sondern eine leere Zelle in der Kreuztabelle roh-x-memoisiert."
+        }
+      ],
+      "source_path": "grouping_memo_build.json",
+      "goals": [
+        "Entscheide, ob grouped+memo (mit memoisiertem Core-Match) gegen flat+memo gebaut und gemessen werden soll, oder ob eine Vorbedingung das blockiert.",
+        "Korrigiere die Scheinalternative 'Core-Match gegen memoisiertem Lookup' aus dem Vorturn."
+      ]
+    },
+    {
+      "reg_id": "grouping_memo_build.json::g_struct",
+      "claim_id": "g_struct",
+      "statement": "Code-Fakt (crash-ueberlebend): Core-Identitaet innerhalb einer Gruppe ist Konstruktionsgarantie des CoreTree (_insert_into/_rule_map).",
+      "status": "given",
+      "negation_handling": null,
+      "derived_from": null,
+      "source_path": "grouping_memo_build.json",
+      "goals": [
+        "Entscheide, ob grouped+memo (mit memoisiertem Core-Match) gegen flat+memo gebaut und gemessen werden soll, oder ob eine Vorbedingung das blockiert.",
+        "Korrigiere die Scheinalternative 'Core-Match gegen memoisiertem Lookup' aus dem Vorturn."
+      ]
+    }
+  ],
+  "claims": {
+    "prior_ans": {
+      "id": "prior_ans",
+      "statement": "Auf memoisierter Baseline ist der Core-Match selbst der Kostentreiber, nicht das Backtracking, das er ersetzen soll. Grouping-fuer-Dispatch ist auf diesem Workload widerlegt.",
+      "status": "assumed",
+      "derived_from": null,
+      "antecedents": null,
+      "negation_handling": "checked",
+      "negation_note": "find_core ist ein exhaustive seed-pair MCS-Finder (Docstring core_finder.py) — Baukonstruktion, kein Dispatch-Match. Zur Dispatch-Zeit steht der Core fest; es gibt nichts zu entdecken. Die 25x waren mein Bau, nicht der Mechanismus. Die 689 statt ~150 Core-Matches waren der Beleg, nicht ein Walk-Bug.",
+      "revises": null
+    },
+    "g_mcs": {
+      "id": "g_mcs",
+      "statement": "Code-Fakt: find_core ist laut eigenem Docstring ein exhaustive seed-pair MCS-Finder ('for each unmapped A-node, try every unmapped B-node as a seed ... repeat until exhausted') — es sucht die groesste gemeinsame Struktur zweier UNBEKANNTER Graphen.",
+      "status": "given",
+      "derived_from": null,
+      "antecedents": null,
+      "negation_handling": null,
+      "negation_note": "",
+      "revises": null
+    },
+    "g_known": {
+      "id": "g_known",
+      "statement": "Code-Fakt: zur Dispatch-Zeit steht node.core_edges seit build_dispatch_tree fest. Das Muster ist bekannt; gesucht ist nur seine Einbettung.",
+      "status": "given",
+      "derived_from": null,
+      "antecedents": null,
+      "negation_handling": null,
+      "negation_note": "",
+      "revises": null
+    },
+    "g_order": {
+      "id": "g_order",
+      "statement": "Gemessen: _find_and_try laeuft node.children in Reihenfolge ab und sperrt jede besuchte Regel im visited-Set. Eine Serialisierung, die children nach Typ umsortiert (erst CoreNodes, dann Strings), erzeugt 4/25 Dispatch-Mismatches bei identischer Menge, identischem _rule_map und identischen Fingerprints.",
+      "status": "given",
+      "derived_from": null,
+      "antecedents": null,
+      "negation_handling": null,
+      "negation_note": "",
+      "revises": null
+    },
+    "g_shape_blind": {
+      "id": "g_shape_blind",
+      "statement": "Gemessen: der erste _shape-Vergleich benutzte sorted()+frozenset und meldete 'struktur identisch' auf genau dem Baum, der anders dispatchte. Der Fehler wurde nur durch echten Dispatch-Vergleich sichtbar.",
+      "status": "given",
+      "derived_from": null,
+      "antecedents": null,
+      "negation_handling": null,
+      "negation_note": "",
+      "revises": null
+    },
+    "g_prop": {
+      "id": "g_prop",
+      "statement": "World-Model (gewachsen): Kanal (ordnungssensitiv, wird-durchlaufen-von, FORWARD) propagiert von children_liste->_find_and_try AUCH auf ADD_RULES_liste->flat_baseline. ADD_RULES ist sorted(); die Ground-Truth aller Aequivalenztests haengt an dieser Sortierung.",
+      "status": "given",
+      "derived_from": null,
+      "antecedents": null,
+      "negation_handling": null,
+      "negation_note": "",
+      "revises": null
+    },
+    "g_pure2": {
+      "id": "g_pure2",
+      "statement": "Gemessen: build_dispatch_tree(252) = 3.34s, load = 0.463s (7x). Baum ist vollstaendig primitiv (int/str/tuple), JSON-faehig ohne Pickle.",
+      "status": "given",
+      "derived_from": null,
+      "antecedents": null,
+      "negation_handling": null,
+      "negation_note": "",
+      "revises": null
+    },
+    "ans_retract": {
+      "id": "ans_retract",
+      "statement": "ans_core_dominates wird ZURUECKGEZOGEN. Die gemessenen 25x stammten daraus, dass find_core (ein MCS-Konstruktionsverfahren) 689 mal im Dispatch-Pfad lief, um ein bereits bekanntes Muster neu zu entdecken. Das misst meinen Bau, nicht Grouping. Ob Grouping mit einem echten Core-Match gewinnt, ist UNGEMESSEN — nicht widerlegt.",
+      "status": "derived",
+      "derived_from": [
+        {
+          "parents": [
+            "prior_ans",
+            "g_mcs",
+            "g_known"
+          ],
+          "rule": "Ein Messergebnis, das aus dem Aufruf eines Konstruktionsverfahrens zur Laufzeit stammt, misst den Aufruf, nicht den Mechanismus; es traegt keine Aussage ueber den Mechanismus."
+        }
+      ],
+      "antecedents": null,
+      "negation_handling": null,
+      "negation_note": "",
+      "revises": {
+        "target": "prior_ans",
+        "prior_text": "Auf memoisierter Baseline ist der Core-Match selbst der Kostentreiber, nicht das Backtracking, das er ersetzen soll. Grouping-fuer-Dispatch ist auf diesem Workload widerlegt.",
+        "why": "find_core ist Baukonstruktion (MCS), kein Dispatch-Match; sein Preis ist kein Eigenschaftsbeleg von Grouping."
+      }
+    },
+    "ans_format": {
+      "id": "ans_format",
+      "statement": "Das Format speichert children als geordnete typisierte Sequenz, weil die Node/String-Verschraenkung (Pattern NNSNNSSSNNSS) Einfuegereihenfolge ist und aus getrennten Mengen nicht rekonstruierbar; _find_and_try liest diese Reihenfolge und sperrt via visited, weshalb Umsortierung 4/25 Dispatch-Mismatches erzeugt. Invalidierung ueber sha256(Namen + Kantenmuster) statt nur Namen, weil eine Regel unter gleichem Namen ihr Muster aendern kann. JSON statt pickle, weil der Baum vollstaendig primitiv ist. Der Aequivalenztest muss ordnungssensitiv sein UND echtes Dispatch vergleichen — der erste _shape war blinder als sein Konsument und meldete PASS auf einem defekten Baum. Gewinn: 3.34s build -> 0.463s load.",
+      "status": "derived",
+      "derived_from": [
+        {
+          "parents": [
+            "g_order",
+            "g_shape_blind",
+            "g_pure2",
+            "ans_retract"
+          ],
+          "rule": "Ein Serialisierungsformat ist genau dann korrekt, wenn es jede Eigenschaft erhaelt, auf die ein Konsument reagiert — Mengengleichheit genuegt nicht, wenn der Konsument die Reihenfolge liest."
+        }
+      ],
+      "antecedents": null,
+      "negation_handling": null,
+      "negation_note": "",
+      "revises": null
+    }
+  },
+  "candidates": {
+    "c_ordered": {
+      "id": "c_ordered",
+      "statement": "children als geordnete typisierte Sequenz [['member',name]|['node',{...}]] speichern; _shape ordnungssensitiv; Fingerprint ueber Namen UND Kantenmuster.",
+      "discriminator": "Konkurriert gegen c_sets (Mengen speichern, Reihenfolge beim Laden rekonstruieren) und c_pickle. Unterscheidende Evidenz: c_sets scheitert an g_order, weil die Reihenfolge Einfuegereihenfolge ist und aus den Mengen nicht rekonstruierbar."
+    },
+    "c_sets": {
+      "id": "c_sets",
+      "statement": "Mengen speichern, Reihenfolge deterministisch beim Laden herstellen.",
+      "discriminator": "Gewinnt, falls die children-Reihenfolge aus den Daten ableitbar waere."
+    },
+    "c_pickle": {
+      "id": "c_pickle",
+      "statement": "pickle statt JSON.",
+      "discriminator": "Gewinnt, falls der Baum nicht-primitive Objekte enthielte."
+    }
+  },
+  "checks": {
+    "k_f_sets": {
+      "id": "k_f_sets",
+      "kind": "falsifier",
+      "target": "c_ordered",
+      "method": "Head-to-head gegen c_sets: pruefe empirisch, ob die children-Reihenfolge aus den Daten rekonstruierbar ist. Falls ja, ist c_ordered ueberfluessige Komplexitaet und c_sets gewinnt.",
+      "result": "TEILWEISE gegen c_ordered: die Members SIND sortiert (mem == sorted(mem) am gepruefen Knoten) — insoweit rekonstruierbar. Aber das Typ-Pattern der Wurzel ist NNSNNSSSNNSS: CoreNodes und Strings sind VERSCHRAENKT in Einfuegereihenfolge. Aus zwei getrennten Mengen ist die Verschraenkung nicht wiederherstellbar, und genau sie erzeugte die 4/25 Mismatches (g_order). c_sets faellt an der Verschraenkung, nicht an der Member-Sortierung.",
+      "outcome": "survived",
+      "side_findings": [
+        {
+          "finding": "Die Member-Sortierung ist rekonstruierbar; nur die Node/String-Verschraenkung nicht. Das Format speichert damit mehr als noetig — belegt aber korrekt, weil die Verschraenkung nicht separat abtrennbar ist ohne die Reihenfolge doch wieder zu kodieren.",
+          "disposition": "carried"
+        }
+      ]
+    },
+    "k_f_pickle": {
+      "id": "k_f_pickle",
+      "kind": "falsifier",
+      "target": "c_ordered",
+      "method": "Gegen c_pickle: enthaelt der Baum nicht-primitive Objekte, die JSON nicht traegt?",
+      "result": "Nein. core_edges=(int,int,str,None), _rule_map=int->int, fingerprints=int->tuple. Vollstaendig primitiv (g_pure2). c_pickle ohne Vorteil, mit Versions-/Sicherheitsrisiko.",
+      "outcome": "survived",
+      "side_findings": null
+    },
+    "k_o_faithful": {
+      "id": "k_o_faithful",
+      "kind": "obligation",
+      "target": "c_ordered",
+      "method": "o_faithful: Dispatch-Aequivalenz auf echten States gegen flat_raw ground truth.",
+      "result": "25 states, fires=25, mismatches=0 nach dem Fix. Vorher 4/25 — der Test hat den eigenen Formatfehler gefangen.",
+      "outcome": "survived",
+      "side_findings": null
+    },
+    "k_o_selfcheck": {
+      "id": "k_o_selfcheck",
+      "kind": "obligation",
+      "target": "c_ordered",
+      "method": "o_selfcheck: war der Strukturvergleich blinder als der Konsument?",
+      "result": "JA, und das ist der Kernbefund (g_shape_blind): _shape benutzte sorted()+frozenset und meldete PASS auf einem anders dispatchenden Baum. Gefixt: _shape ist jetzt ordnungssensitiv. Die Lehre ist allgemein — ein Aequivalenztest muss mindestens so ordnungssensitiv sein wie sein Konsument.",
+      "outcome": "survived",
+      "side_findings": [
+        {
+          "finding": "g_prop: derselbe Kanal propagiert auf ADD_RULES_liste->flat_baseline. ADD_RULES ist sorted(); die Ground-Truth ALLER Aequivalenztests dieser Session haengt an dieser Sortierung. Ungeprueft, ob eine andere Sortierung andere 'richtige' Regeln liefert.",
+          "disposition": "filed"
+        }
+      ]
+    },
+    "k_f_ans": {
+      "id": "k_f_ans",
+      "kind": "falsifier",
+      "target": "ans_format",
+      "method": "Versuche die Antwort zu brechen: gibt es eine Eigenschaft, auf die ein Konsument reagiert und die das Format NICHT erhaelt?",
+      "result": "Ueberlebt fuer die geprueften Konsumenten (dispatch/_find_and_try), aber die Antwort ist NICHT allgemein: geprueft wurde nur dispatch(). cross_reference() und _propagate_discovery() wurden nie gegen den geladenen Baum getestet, und _pairwise/_delta_cache werden gar nicht serialisiert (sie sind Caches, aber cross_reference() fuellt sie und ist im Bau NICHT aufgerufen worden). Ein Konsument, der cross_reference() auf einem geladenen Baum aufruft, ist ungetestet.",
+      "outcome": "survived",
+      "side_findings": [
+        {
+          "finding": "_pairwise und _delta_cache werden nicht serialisiert; cross_reference() auf geladenem Baum ungetestet. Falls es je im Dispatch-Pfad landet, ist das Format unvollstaendig.",
+          "disposition": "filed"
+        }
+      ]
+    },
+    "k_rel": {
+      "id": "k_rel",
+      "kind": "relevance",
+      "target": "ans_format",
+      "method": "I9: bindet Evidenz an beide Ziele. Ziel 1 (Format gaten): g_order/g_shape_blind/g_pure2 begruenden jede Formatentscheidung, gemessen nicht behauptet. Ziel 2 (Rueckzug): ans_retract revidiert prior_ans via I8 mit woertlichem Zitat, gestuetzt auf g_mcs/g_known.",
+      "result": "Beide Ziele erreicht. Das Format ist gegen gemessene Konsumenten-Eigenschaften begruendet; der falsche Befund ist zurueckgezogen und die offene Frage (Grouping mit echtem Core-Match) als UNGEMESSEN markiert statt als widerlegt.",
+      "outcome": "survived",
+      "side_findings": null
+    }
+  },
+  "obligations": {
+    "id": "statement"
+  },
+  "committed": {
+    "answer": "ans_format",
+    "statement": "Das Format speichert children als geordnete typisierte Sequenz, weil die Node/String-Verschraenkung (Pattern NNSNNSSSNNSS) Einfuegereihenfolge ist und aus getrennten Mengen nicht rekonstruierbar; _find_and_try liest diese Reihenfolge und sperrt via visited, weshalb Umsortierung 4/25 Dispatch-Mismatches erzeugt. Invalidierung ueber sha256(Namen + Kantenmuster) statt nur Namen, weil eine Regel unter gleichem Namen ihr Muster aendern kann. JSON statt pickle, weil der Baum vollstaendig primitiv ist. Der Aequivalenztest muss ordnungssensitiv sein UND echtes Dispatch vergleichen — der erste _shape war blinder als sein Konsument und meldete PASS auf einem defekten Baum. Gewinn: 3.34s build -> 0.463s load.",
+    "evidence_label": "assumed",
+    "assumptions_carried": [
+      "prior_ans"
+    ],
+    "carried_unexplored": []
+  },
+  "call_log": [
+    [
+      "ground",
+      [
+        "prior_ans",
+        "g_mcs",
+        "g_known",
+        "g_order",
+        "g_shape_blind",
+        "g_prop",
+        "g_pure2",
+        "ans_retract"
+      ]
+    ],
+    [
+      "oblige",
+      [
+        {
+          "id": "o_faithful",
+          "statement": "Das Format muss dispatch-aequivalent laden: identisches Ergebnis auf echten States, nicht nur identische Mengen."
+        },
+        {
+          "id": "o_invalidate",
+          "statement": "Ein Baum zu einer geaenderten Regelmenge muss abgelehnt werden, nicht still geladen."
+        },
+        {
+          "id": "o_selfcheck",
+          "statement": "Der Strukturvergleich des Tests darf nicht blinder sein als der Konsument der Struktur."
+        }
+      ]
+    ],
+    [
+      "propose",
+      [
+        "c_ordered",
+        "c_sets",
+        "c_pickle"
+      ]
+    ],
+    [
+      "check",
+      [
+        "k_f_sets",
+        "k_f_pickle",
+        "k_o_faithful",
+        "k_o_selfcheck"
+      ]
+    ],
+    [
+      "ground",
+      [
+        "ans_format"
+      ]
+    ],
+    [
+      "check",
+      [
+        "k_f_ans",
+        "k_rel"
+      ]
+    ],
+    [
+      "commit",
+      "ans_format"
+    ]
+  ]
+}
