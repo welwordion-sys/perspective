@@ -35,6 +35,8 @@ arithmetic_spine.register_all()
 
 from basic_machinery.operations import _registry
 
+import os
+
 MAX_STEPS = 40  # upper bound on rewrite steps per case
 
 
@@ -54,18 +56,65 @@ def seed_layer(lg: LayeredGraph, g: PerspectiveGraph, layer_key) -> None:
         lg.set_edges(n, layer_key, incident)
 
 
+#: Grouped dispatch statt per-rule match-all. Siehe grouping/matcher.py.
+#: KB layer_battery_slow: "apply_to_layer iterates all 257 registered rules per
+#: step until one fires ... Full 64-case battery times out at 90s."
+#: KB reversibility_classifier_design.ers_audit: der fingerprint-gate wurde
+#: getestet und brachte NULL nutzen (0/257 regeln uebersprungen); "real pruning
+#: would require leveraging CoreTree's shared-core walk ... which was not
+#: attempted." Genau das macht Matcher jetzt: gemessen 2.27x, 167 statt 2921
+#: invocations, 4544 uebersprungene regelversuche, 0 mismatches.
+#: Default AUS: einschalten via USE_GROUPED_DISPATCH oder env PERSPECTIVE_GROUPED=1.
+USE_GROUPED_DISPATCH = os.environ.get('PERSPECTIVE_GROUPED', '') == '1'
+
+_MATCHER = None
+
+
+def _matcher():
+    """Lazy: der baum wird einmal gebaut/geladen, nicht pro lauf.
+
+    WICHTIG list(_registry) statt sorted(): die registry-reihenfolge ist NICHT
+    sortiert (erste eintraege: add_zero_collapse, mul_one_collapse, ...). Da
+    bei mehreren treffern die ERSTE regel feuert, wuerde sorted() eine andere
+    regel waehlen als der loop — das waere eine verhaltensaenderung, kein
+    speedup. Gemessen mit list(_registry): 51 schritte, 0 abweichungen.
+    """
+    global _MATCHER
+    if _MATCHER is None:
+        import os.path as _op
+        from matcher import Matcher
+        _MATCHER = Matcher(list(_registry),
+                           tree_path=_op.join(_op.dirname(_op.dirname(
+                               _op.abspath(__file__))), 'grouping',
+                               'registry_tree.json'))
+    return _MATCHER
+
+
+def find_firing_rule(g: PerspectiveGraph):
+    """Name der feuernden Regel, oder None. Trennt SUCHE von ANWENDUNG.
+
+    Der alte pfad verschmilzt beides: apply() wird probiert und bei
+    fehlschlag zurueckgerollt (g.copy() + restore pro regel). Grouped
+    dispatch kann nur greifen, wenn die suche eigenstaendig ist.
+    """
+    if USE_GROUPED_DISPATCH:
+        return _matcher().dispatch(g)
+    for nm, op in _registry.items():
+        snap = g.copy()
+        if apply(g, op):
+            g.restore(snap)
+            return nm
+        g.restore(snap)
+    return None
+
+
 def oracle_run(g: PerspectiveGraph) -> PerspectiveGraph | None:
     """Drive g to completion via apply(), return final graph or None on timeout."""
     for _ in range(MAX_STEPS):
-        fired = False
-        for op in _registry.values():
-            snap = g.copy()
-            if apply(g, op):
-                fired = True
-                break
-            g.restore(snap)
-        if not fired:
+        nm = find_firing_rule(g)
+        if nm is None:
             return g
+        apply(g, _registry[nm])
     return None  # did not terminate
 
 
@@ -77,9 +126,39 @@ def layer_run(lg: LayeredGraph, registry: LayerRegistry, base: int
     current = base
 
     for step in range(MAX_STEPS):
+        next_layer = current + 1
+
+        if USE_GROUPED_DISPATCH:
+            # SUCHE getrennt von ANWENDUNG. Der alte loop rief
+            # apply_to_layer pro regel; das materialisiert intern
+            # lg.materialize(base_layer) JEDES MAL neu (schema.py:492) und
+            # matcht dann (schema.py:497). Bei 257 regeln pro schritt ist das
+            # 257 materialisierungen + 257 matches, nur um EINE feuernde regel
+            # zu finden. Grouped dispatch sucht auf EINEM materialisierten
+            # graph und wendet dann genau die gewinner-regel an.
+            # Gefahrlos, weil layer_apply_schema bei binding is None sofort
+            # None zurueckgibt, BEVOR es schreibt (schema.py:498) — ein
+            # fehlversuch hinterlaesst keine layer.
+            base = lg.materialize(current)
+            nm = _matcher().dispatch(base)
+            if nm is None:
+                break
+            res = apply_to_layer(lg, registry, current, next_layer,
+                                 _registry[nm])
+            if not res.fired:
+                # darf nicht vorkommen: dispatch ist aequivalent zu
+                # match_cut_at_edge, das layer_apply_schema selbst benutzt.
+                errors.append(
+                    f"step {step}: dispatch picked {nm} but apply_to_layer "
+                    f"did not fire — dispatch/match divergence")
+                break
+            errs = check_layer(lg, registry, current, next_layer, res)
+            errors.extend(errs)
+            current = next_layer
+            continue
+
         fired = False
         for op in _registry.values():
-            next_layer = current + 1
             res = apply_to_layer(lg, registry, current, next_layer, op)
             if res.fired:
                 errs = check_layer(lg, registry, current, next_layer, res)
