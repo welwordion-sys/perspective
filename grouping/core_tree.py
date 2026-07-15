@@ -209,6 +209,8 @@ class CoreTree:
         self.min_ratio = min_ratio
         self.cross_ref_min_delta = cross_ref_min_delta  # min delta fraction for cross-ref
         self.root: CoreNode | None = None
+        #: coreless rules seen before any root existed (see insert)
+        self._pending_leaves: list[str] = []
         # Pairwise cache: frozenset({a, b}) -> (core_edges_in_a_space, node_map_a_to_b)
         self._pairwise: dict[frozenset, tuple[set[Edge], dict]] = {}
         # Rule edges cache
@@ -235,6 +237,26 @@ class CoreTree:
         """Insert a new rule into the tree."""
         self._rule_edges[name] = edges
 
+        # A rule with no edges in its match view cannot carry a core: the MCS
+        # of an empty edge set with anything is empty. If such a rule lands at
+        # the root (insert order decides this — the registry's first rule is
+        # add_zero_collapse, which binds a single node and therefore yields
+        # zero relations), the root core is empty and NOTHING can group
+        # beneath it. Measured: full registry 257 rules -> 1 core node, all
+        # flat; the same 257 with these rules held out -> 55 core nodes.
+        # Such rules belong at a leaf, not at the root. This mirrors the
+        # existing "fingerprint excluded everywhere -> add as leaf at root"
+        # path below; the only reason it did not apply was that the FIRST
+        # insert bypassed every check.
+        if not edges:
+            self._rule_delta[name] = ({}, 0.0, set())
+            self._rule_map[name] = {}
+            if self.root is None:
+                self._pending_leaves.append(name)
+            else:
+                self.root.children.append(name)
+            return
+
         if self.root is None:
             # First rule — create root with trivial core (the rule itself)
             node = _make_node(set(edges))
@@ -242,6 +264,10 @@ class CoreTree:
             self.root = node
             self._rule_delta[name] = ({}, 0.0, set())
             self._rule_map[name] = {}
+            # Rules parked before any root existed now attach as leaves.
+            for parked in self._pending_leaves:
+                node.children.append(parked)
+            self._pending_leaves = []
             return
 
         # General case: walk tree to find insertion point (also handles the
