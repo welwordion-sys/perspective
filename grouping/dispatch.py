@@ -39,6 +39,18 @@ def _rule_edges(name: str) -> list[Edge]:
     for src, lst in rel.items():
         for (tgt, etype) in lst:
             edges.append((src.id, tgt.id, etype.name, None))
+    # DETERMINISMUS — die Wurzel des Problems, nicht ein Detail.
+    # rel ist ein dict mit Node-OBJEKTEN als Keys; seine Einfuegereihenfolge
+    # stammt aus _input_relations, das ueber view.bind_targets iteriert — ein
+    # set von Node-Objekten. Node hat keinen Werthash, also ist sein Hash die
+    # Speicheradresse, und die ist pro Prozess anders. Ergebnis: identischer
+    # INHALT, andere REIHENFOLGE (gemessen: sortierter Hash stabil 5e9750cf,
+    # roher Hash 4d94e961 vs 4e8706f7 ueber zwei Laeufe).
+    # _grow_from waechst entlang dieser Reihenfolge, also baute jeder Prozess
+    # einen strukturell anderen Baum. Sortieren macht die Kantenliste zur
+    # reinen Funktion der Regel — die Voraussetzung dafuer, dass der Baum
+    # ueberhaupt serialisierbar und der Benchmark reproduzierbar ist.
+    edges.sort(key=lambda e: (e[0], e[1], e[2]))
     return edges
 
 
