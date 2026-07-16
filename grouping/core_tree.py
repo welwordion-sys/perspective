@@ -208,9 +208,13 @@ class CoreTree:
     def __init__(self, min_ratio: float = 0.3, cross_ref_min_delta: float = 0.2):
         self.min_ratio = min_ratio
         self.cross_ref_min_delta = cross_ref_min_delta  # min delta fraction for cross-ref
-        self.root: CoreNode | None = None
-        #: coreless rules seen before any root existed (see insert)
-        self._pending_leaves: list[str] = []
+        #: WALD, nicht ein Baum. Eine Regel, die unter keinen bestehenden Core
+        #: passt, ist eine EIGENE WURZEL — kein Leaf unter einem fremden Core.
+        #: Der Notbehelf davor hing sie unter den zufaellig ersten Core; dessen
+        #: Core-Miss erschlug sie dann als Kollateralschaden, obwohl sie mit
+        #: diesem Core nie etwas zu tun hatte (gruppenweite negative
+        #: Information gilt nur fuer echte Gruppenmitglieder).
+        self.roots: list[CoreNode] = []
         # Pairwise cache: frozenset({a, b}) -> (core_edges_in_a_space, node_map_a_to_b)
         self._pairwise: dict[frozenset, tuple[set[Edge], dict]] = {}
         # Rule edges cache
@@ -229,6 +233,17 @@ class CoreTree:
         # we always pass the live node object.
         self._delta_cache: dict[tuple[int, str], frozenset] = {}
 
+    @property
+    def root(self) -> CoreNode | None:
+        """KOMPAT-SHIM: erster Root des Waldes, oder None.
+
+        Nur damit Altkonsumenten (Serialisierung, Tests) nicht still brechen.
+        Wer ueber den Wald laufen will, MUSS self.roots nehmen — `root` sieht
+        per Konstruktion nur einen Teil und ist genau der Bug, den der Umbau
+        entfernt.
+        """
+        return self.roots[0] if self.roots else None
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -238,36 +253,30 @@ class CoreTree:
         self._rule_edges[name] = edges
 
         # A rule with no edges in its match view cannot carry a core: the MCS
-        # of an empty edge set with anything is empty. If such a rule lands at
-        # the root (insert order decides this — the registry's first rule is
-        # add_zero_collapse, which binds a single node and therefore yields
-        # zero relations), the root core is empty and NOTHING can group
-        # beneath it. Measured: full registry 257 rules -> 1 core node, all
-        # flat; the same 257 with these rules held out -> 55 core nodes.
-        # Such rules belong at a leaf, not at the root. This mirrors the
-        # existing "fingerprint excluded everywhere -> add as leaf at root"
-        # path below; the only reason it did not apply was that the FIRST
-        # insert bypassed every check.
+        # of an empty edge set with anything is empty. Measured: full registry
+        # 257 rules -> 1 core node, all flat; the same 257 with these rules
+        # held out -> 55 core nodes.
+        #
+        # WALD: so eine Regel wird EIGENE WURZEL mit leerem Core. Vorher wurde
+        # sie unter den ersten Core geparkt (_pending_leaves) — dessen Miss
+        # erschlug sie mit, ohne dass sie je zu ihm gehoert haette. Ein leerer
+        # Core matcht trivial (nichts zu finden), also wird die Regel immer
+        # probiert und nie faelschlich uebersprungen.
         if not edges:
             self._rule_delta[name] = ({}, 0.0, set())
             self._rule_map[name] = {}
-            if self.root is None:
-                self._pending_leaves.append(name)
-            else:
-                self.root.children.append(name)
+            node = _make_node(set())
+            node.children.append(name)
+            self.roots.append(node)
             return
 
-        if self.root is None:
+        if not self.roots:
             # First rule — create root with trivial core (the rule itself)
             node = _make_node(set(edges))
             node.children.append(name)
-            self.root = node
+            self.roots.append(node)
             self._rule_delta[name] = ({}, 0.0, set())
             self._rule_map[name] = {}
-            # Rules parked before any root existed now attach as leaves.
-            for parked in self._pending_leaves:
-                node.children.append(parked)
-            self._pending_leaves = []
             return
 
         # General case: walk tree to find insertion point (also handles the
@@ -276,17 +285,32 @@ class CoreTree:
         # size-asymmetric subgraph-embedding test rather than jumping straight
         # to a same-size pairwise core, which risks a spurious total-graph
         # isomorphism on structurally symmetric rule families).
-        placed = self._insert_into(self.root, name, edges)
+        #
+        # WALD: jeden Root probieren, nicht nur den ersten. Der erste Treffer
+        # gewinnt (Platzierung, nicht Suche — hier ist first-match korrekt:
+        # eine Regel wohnt an genau einer Stelle).
+        placed = False
+        for r in self.roots:
+            if self._insert_into(r, name, edges):
+                placed = True
+                break
         if not placed:
-            # Fingerprint excluded everywhere — add as leaf at root with empty map
-            self.root.children.append(name)
+            # Passt unter keinen bestehenden Core -> EIGENE WURZEL.
+            # Vorher: Leaf unter self.root mit leerer Map — fremder Core-Miss
+            # erschlug die Regel. Jetzt traegt sie ihren eigenen Core.
+            node = _make_node(set(edges))
+            node.children.append(name)
+            self.roots.append(node)
             self._rule_map[name] = {}
 
         # Compute and store delta info for cross-reference pass
         self._update_delta_info(name, edges)
 
     def all_rules(self) -> frozenset:
-        return self.root.members if self.root else frozenset()
+        out: set = set()
+        for r in self.roots:
+            out |= r.members
+        return frozenset(out)
 
     def _update_delta_info(self, name: str, edges: list[Edge]) -> None:
         """
@@ -367,9 +391,13 @@ class CoreTree:
 
     def print_tree(self, node: CoreNode | None = None, indent: int = 0) -> None:
         if node is None:
-            node = self.root
-        if node is None:
-            print("<empty tree>")
+            # WALD: alle wurzeln drucken, nicht nur die erste.
+            if not self.roots:
+                print("<empty forest>")
+                return
+            for i, r in enumerate(self.roots):
+                print(f"--- root {i+1}/{len(self.roots)} ---")
+                self.print_tree(r, indent)
             return
         prefix = '  ' * indent
         print(f"{prefix}CoreNode(core={node.size}, members={set(node.members)})")

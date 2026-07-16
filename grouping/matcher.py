@@ -321,6 +321,95 @@ class Matcher:
         self._sat_cache = {}      # pro state: (anforderung) -> erfuellermenge
         return self._walk(self.tree.root, graph, di, hd, set(), {})
 
+    def collect_all(self, graph):
+        """ALLE (operation, binding) paare — der fehlende produzent fuer
+        apply_compound/reverse_fire.
+
+        apply_compound's docstring: "matches: list of (operation, binding)
+        already collected for this pass (e.g. via match_all/find_all_cores
+        per rule)". Dieser produzent existierte nicht; apply_compound und
+        reverse_fire bekamen matches immer von hand hereingereicht, weshalb
+        der GA-loop (regeln -> layer -> reversibility) keinen aufrufer hatte.
+
+        Unterschied zu dispatch(): dispatch stoppt bei der ERSTEN feuernden
+        regel (first-match-wins, forward-pfad). Hier wird NICHT gestoppt —
+        jede regel, die matcht, kommt mit ALLEN ihren bindungen in die liste.
+        Das ist die semantik, die compound match resolution braucht: sie muss
+        alle matches sehen, bevor sie entscheidet, welche ueberlappen.
+
+        Grouping traegt hier unveraendert: ein core-miss erschlaegt die ganze
+        gruppe, ohne eine regel anzufassen (negative information). Nur der
+        abbruch beim ersten treffer entfaellt. Die core-bindung seedet
+        match_all genauso wie _match_rule — match_all hat dieselbe
+        seed_map-signatur.
+        """
+        from basic_machinery.match_view import match_all
+        out = []
+        if not self.use_grouping or self.tree is None or not self.tree.roots:
+            nodes = list(graph.nodes)
+            for nm in self.rules:
+                view, _rel, _by = self._view_of(nm)
+                for b in match_all(ops._registry[nm].graph2, graph, nodes,
+                                   view=view):
+                    out.append((ops._registry[nm], b))
+            return out
+        hd = {g: self._host_deg(g, graph) for g in graph.nodes}
+        self._sat_cache = {}
+        # WALD: jede Wurzel laufen. visited wird ueber alle Wurzeln geteilt,
+        # damit cross_reference-Regeln unter mehreren Wurzeln nicht doppelt
+        # in out landen. acc startet pro Wurzel frisch — Core-Bindungen einer
+        # Wurzel gelten nicht in einer anderen.
+        visited = set()
+        for r in self.tree.roots:
+            self._collect_walk(r, graph, hd, visited, {}, out)
+        return out
+
+    def _collect_walk(self, node, graph, hd, visited, acc, out):
+        under = self._members_under(node)
+        self.stats['core_probe'] += 1
+        nm_map = self._match_core(node, graph, hd)
+        if nm_map is None:
+            self.stats['core_miss'] += 1
+            self.stats['rules_skipped'] += len(under)
+            return                      # gruppenweite negative information
+        self.stats['core_hit'] += 1
+        acc = dict(acc); acc.update(nm_map)
+
+        for c in node.children:
+            if isinstance(c, CoreNode) and id(c) not in visited:
+                visited.add(id(c))
+                self._collect_walk(c, graph, hd, visited, acc, out)
+
+        from basic_machinery.match_view import match_all
+        nodes = list(graph.nodes)
+        for nm in [c for c in node.children
+                   if isinstance(c, str) and c not in visited]:
+            visited.add(nm)
+            view, _rel, by_id = self._view_of(nm)
+            seed = {}
+            for core_lbl, rule_id in self.tree._rule_map.get(nm, {}).items():
+                if core_lbl in acc:
+                    tgt = by_id.get(rule_id)
+                    if tgt is not None:
+                        # CUT-GENAUIGKEIT: derselbe degree-check wie in
+                        # _match_rule. _match_core filtert mit >=, match_all
+                        # verlangt gleichheit — ein ungeprueter seed macht aus
+                        # einem nicht-match einen match (gemessen: add_init_00
+                        # auf 0+1=1).
+                        if view.expected_degree.get(tgt) is not None:
+                            from basic_machinery.match_view import real_total_degree
+                            if real_total_degree(acc[core_lbl], graph) != \
+                               view.expected_degree[tgt]:
+                                seed = None
+                                break
+                        seed[tgt] = acc[core_lbl]
+            if seed is None:
+                continue
+            self.stats['invoc'] += 1
+            for b in match_all(ops._registry[nm].graph2, graph, nodes,
+                               view=view, seed_map=seed or None):
+                out.append((ops._registry[nm], b))
+
     def flat(self, graph):
         di = self._degree_index(graph)
         for nm in self.rules:

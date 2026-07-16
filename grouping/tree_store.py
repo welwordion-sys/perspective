@@ -46,7 +46,9 @@ for _p in ['', 'grouping', 'builders', 'basic_machinery']:
 from core_tree import CoreTree, CoreNode
 from dispatch import build_dispatch_tree, _rule_edges
 
-FORMAT_VERSION = 1
+#: 2 = Wald (roots-liste) statt einzelner root. Bump ZWINGEND: ein v1-blob
+#: hat "root" und wuerde unter v2 still als Ein-Baum-Wald geladen.
+FORMAT_VERSION = 2
 
 
 # ---------------------------------------------------------------- fingerprint
@@ -96,7 +98,9 @@ def dump_tree(tree: CoreTree, rule_names: list[str], path: str) -> None:
         "rule_count": len(rule_names),
         "min_ratio": tree.min_ratio,
         "cross_ref_min_delta": tree.cross_ref_min_delta,
-        "root": _enc_node(tree.root) if tree.root else None,
+        # WALD: alle wurzeln, nicht nur die erste. Vorher haette die
+        # serialisierung den rest des waldes still verschluckt.
+        "roots": [_enc_node(r) for r in tree.roots],
         "rule_map": {nm: [[k, v] for k, v in m.items()]
                      for nm, m in tree._rule_map.items()},
         "rule_edges": {nm: [list(e) for e in es]
@@ -157,7 +161,7 @@ def load_tree(path: str, rule_names: list[str]) -> CoreTree | None:
 
     t = CoreTree(min_ratio=blob["min_ratio"],
                  cross_ref_min_delta=blob["cross_ref_min_delta"])
-    t.root = _dec_node(blob["root"], None) if blob["root"] else None
+    t.roots = [_dec_node(r, None) for r in blob["roots"]]
     t._rule_map = {nm: {k: v for k, v in pairs}
                    for nm, pairs in blob["rule_map"].items()}
     t._rule_edges = {nm: [tuple(e) for e in es]
@@ -231,7 +235,9 @@ def _main():
     print(f"load  : {t_load:.3f}s   ({t_build/t_load:.0f}x schneller)")
 
     # 1. Struktur identisch?
-    assert _shape(built.root) == _shape(loaded.root), "STRUKTUR WEICHT AB"
+    assert [_shape(r) for r in built.roots] == [_shape(r) for r in loaded.roots], \
+        "STRUKTUR WEICHT AB"
+    assert len(built.roots) == len(loaded.roots), "WURZELZAHL WEICHT AB"
     print("ok: baumstruktur identisch (cores, fingerprints, members, rekursiv)")
 
     # 2. rule_map identisch?
@@ -252,7 +258,8 @@ def _main():
     n_b = b2.cross_reference()
     n_l = l2.cross_reference()
     assert n_b == n_l, f"cross_reference WEICHT AB: built={n_b} loaded={n_l}"
-    assert _shape(b2.root) == _shape(l2.root), "baeume divergieren NACH cross_reference"
+    assert [_shape(r) for r in b2.roots] == [_shape(r) for r in l2.roots], \
+        "baeume divergieren NACH cross_reference"
     print(f"ok: cross_reference identisch ({n_b} entdeckungen, struktur danach gleich)")
 
     # 3. parent-links rekonstruiert?
@@ -261,19 +268,34 @@ def _main():
         for c in n.children:
             if isinstance(c, CoreNode):
                 chk_parent(c, n)
-    chk_parent(loaded.root, None)
+    for _r in loaded.roots:
+        chk_parent(_r, None)
     print("ok: parent-links rekonstruiert")
 
     # 4. Invalidierung: geaenderte Regelmenge muss abgelehnt werden
     assert load_tree(path, ADD[:-1]) is None, "stale baum wurde AKZEPTIERT"
     print("ok: geaenderte regelmenge wird abgelehnt (kein stiller stale-load)")
 
-    # 5. Dispatch-Aequivalenz auf echten States
+    # 5. Match-Aequivalenz auf echten States: built gegen loaded.
+    #
+    # SERIALISIERUNGSTEST, nicht Korrektheitstest — built vs loaded, NICHT
+    # gegen flat (das ist test_matcher's job).
+    #
+    # Zweck (ursprung): _shape ist blinder als sein konsument. Eine
+    # serialisierung, die children umsortierte, meldete _shape-identisch und
+    # dispatchte trotzdem 4/25 verschieden. Ein strukturvergleich, der weniger
+    # sieht als der konsument, meldet PASS auf einem defekten baum. Dieser
+    # zweck ueberlebt den wegfall von dispatch — der konsument heisst dann nur
+    # collect_all.
+    #
+    # collect_all statt dispatch: dispatch bricht beim ersten treffer ab und
+    # ist ordnungssensitiv; collect_all sammelt jede regel mit jeder bindung.
+    # Vergleich als multimenge von (op.name, sorted(binding)).
     from basic_machinery.encoding import encode
     from basic_machinery.graph import PerspectiveGraph
     from basic_machinery.operations import apply
     from basic_machinery.match_view import derive_match_view, match_cut_at_edge
-    from dispatch import dispatch
+    from matcher import Matcher
 
     def flat(g):
         for nm in ADD:
@@ -282,6 +304,23 @@ def _main():
                                  view=derive_match_view(r.graph2)) is not None:
                 return nm
         return None
+
+    # Zwei Matcher auf DENSELBEN regeln, deren baeume gegen die bereits
+    # gehaltenen in-memory-baeume getauscht werden. Kein rebuild, sonst
+    # testet der check nicht built-gegen-loaded.
+    m_built = Matcher(ADD, tree_path=path)
+    m_loaded = Matcher(ADD, tree_path=path)
+    m_built.tree = built
+    m_loaded.tree = loaded
+
+    def sig(matches):
+        # Node.id ist die stabile identitaet (deterministisch vom graph
+        # vergeben); Node selbst ist nicht ordbar, und id() waere pro lauf
+        # verschieden. Beide seiten laufen auf snapshots DESSELBEN graphen,
+        # also sind die ids vergleichbar.
+        return sorted((op.name,
+                       tuple(sorted((k.id, v.id) for k, v in b.items())))
+                      for op, b in matches)
 
     mism = fires = n = 0
     for a in range(3):
@@ -292,16 +331,22 @@ def _main():
                 if truth is None:
                     break
                 gb = ops.snapshot(g); gl = ops.snapshot(g)
-                rb = dispatch(gb, built)
-                rl = dispatch(gl, loaded)
+                rb = sig(m_built.collect_all(gb))
+                rl = sig(m_loaded.collect_all(gl))
                 n += 1
-                if truth is not None:
+                if rb:
                     fires += 1
                 if rb != rl:
                     mism += 1
-                    print(f"  MISMATCH {a}+{b}: built={rb} loaded={rl}")
+                    only_b = [x for x in rb if x not in rl]
+                    only_l = [x for x in rl if x not in rb]
+                    print(f"  MISMATCH {a}+{b}: |built|={len(rb)} |loaded|={len(rl)}")
+                    for x in only_b[:3]:
+                        print(f"    nur built : {x[0]}")
+                    for x in only_l[:3]:
+                        print(f"    nur loaded: {x[0]}")
                 apply(g, ops._registry[truth])
-    print(f"ok: dispatch identisch auf {n} states (fires={fires}, mismatches={mism})")
+    print(f"ok: collect_all identisch auf {n} states (fires={fires}, mismatches={mism})")
     assert fires > 0, "VACUOUS"
     assert mism == 0
 
