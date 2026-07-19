@@ -8,6 +8,7 @@ side effect of optimizing something else, unreadable from the outside and fragil
 under change. Perspective is an attempt to do the opposite: make representation an
 explicit, inspectable structure — a graph — and make *traversal of representation
 space* the primary mechanism, not an emergent accident.
+Current AI systems optimize reasoning within representations. Perspective explores the possibility that intelligence requires searching the space of representations themselves."
 
 ---
 
