@@ -76,10 +76,61 @@ class Disposition(Enum):
 
 @dataclass(frozen=True)
 class ProvenanceEntry:
-    """One source->result correspondence with its disposition."""
+    """One source->result correspondence with its disposition.
+
+    `rule` and `touched` were added 2026-08-22 because provenance had to serve
+    a second consumer: DOWNWARD travel. Sideways travel recovers its source
+    from the ruleset inverse and needs neither. Upward travel has nothing that
+    points back, so the recording is the only route -- and a recording that
+    cannot say WHICH rule produced a node, or whether a node was changed at
+    all, is not enough to reverse by.
+    """
     source: Node | None      # None only for BORN results
     result: Node | None      # None for CONSUMED sources
     disposition: Disposition
+
+    rule: RuleId | None = None
+    """Which rule produced this entry.
+
+    WHY: different rules can produce the SAME output. A result node alone does
+    not say which inverse to apply, and a layer normally fires several rules at
+    once (apply_compound), so LayerRecord.ruleset -- a set for the whole layer
+    -- cannot attribute a single node.
+
+    None means NOT ATTRIBUTABLE, and that is a real state, not a gap: where
+    matches overlapped, the firing is in effect a hybrid rule whose output is
+    rarely traceable to one rule. Sven, 2026-08-22: an overlap is lost
+    provenance. Entries with rule=None must FAIL the descent filter rather than
+    be guessed at."""
+
+    touched: bool = True
+    """Did the rule actually change this node, or merely read it?
+
+    WHY: unchanged nodes remain reversible even when a later layer matched over
+    them, so the composition test below needs the nodes a layer CHANGED, not
+    the region it matched. MAPPED alone cannot distinguish the two -- it means
+    '1:1 correspondence', which covers both rewritten and untouched."""
+
+
+@dataclass(frozen=True)
+class DeletedCrossing:
+    """An edge across the region boundary that a firing removed.
+
+    WHY THIS IS SEPARATE FROM ProvenanceEntry: provenance held node
+    correspondences only, so a deleted edge to an OUTSIDE node was not merely
+    unreconstructible -- it was not even DETECTABLE. Sven, 2026-08-22: an edge
+    to an unknown outer node that was deleted cannot be reconstructed. Nor can
+    a rule that deletes all nodes be undone.
+
+    Recording it turns a silent loss into a stated one: `external_known` says
+    whether the far end survived somewhere in the layer. False means the
+    descent ends here, provably, instead of quietly producing a wrong graph.
+    """
+    source: Node
+    external: Node
+    edge_type: object
+    direction: str            # 'out' | 'in', relative to `source`
+    external_known: bool
 
 
 @dataclass
@@ -96,6 +147,49 @@ class Provenance:
     Maps naturally onto a hyperedge over the source region (named upgrade path).
     """
     entries: list[ProvenanceEntry] = field(default_factory=list)
+    deleted_crossings: list[DeletedCrossing] = field(default_factory=list)
+
+    # -- consumers below. Kept as METHODS ON THE RECORDING, not as free
+    # -- functions in the GA, because a later filter that is itself a graph
+    # -- (Sven, 2026-08-22) should be able to replace the body without every
+    # -- caller changing.
+
+    def result_nodes_of(self, rule: RuleId) -> set[Node]:
+        """Result nodes attributable to ONE rule. Entries with rule=None are
+        excluded on purpose -- see ProvenanceEntry.rule."""
+        return {e.result for e in self.entries
+                if e.result is not None and e.rule == rule}
+
+    def touched_sources(self) -> set[Node]:
+        """Sources this firing actually changed. Read-only matches excluded."""
+        return {e.source for e in self.entries if e.source is not None and e.touched}
+
+    def image_of(self, nodes: set[Node]) -> set[Node]:
+        """Carry a node set forward through this layer's mapping.
+
+        WHY: result nodes do NOT keep their identity as later layers fire --
+        each MAPPED/INHERITED entry moves them on. Checking a low layer against
+        a state several layers up therefore means carrying its node set along,
+        one layer at a time. This is 'identifying displaced structures',
+        including the case where a rule reduced a structure to a single node.
+        CONSUMED sources contribute nothing: they are gone."""
+        out: set[Node] = set()
+        for e in self.entries:
+            if e.source in nodes and e.result is not None:
+                out.add(e.result)
+        return out
+
+    def descent_blocked(self) -> str | None:
+        """Why a descent through this layer is impossible, or None if it is not.
+
+        Two blockers, both from Sven 2026-08-22: a deleted crossing to an
+        unknown outer node, and a firing that deletes everything."""
+        for c in self.deleted_crossings:
+            if not c.external_known:
+                return f"deleted crossing to unknown external node {c.external!r}"
+        if self.entries and not self.result_nodes():
+            return "every node consumed, nothing to reverse into"
+        return None
 
     def source_region(self) -> set[Node]:
         return {e.source for e in self.entries if e.source is not None}
@@ -103,8 +197,56 @@ class Provenance:
     def result_nodes(self) -> set[Node]:
         return {e.result for e in self.entries if e.result is not None}
 
-    def add(self, source: Node | None, result: Node | None, disposition: Disposition) -> None:
-        self.entries.append(ProvenanceEntry(source, result, disposition))
+    def add(self, source: Node | None, result: Node | None,
+            disposition: Disposition, rule: RuleId | None = None,
+            touched: bool = True) -> None:
+        self.entries.append(ProvenanceEntry(source, result, disposition,
+                                            rule=rule, touched=touched))
+
+    def add_deleted_crossing(self, source: Node, external: Node, edge_type,
+                             direction: str, external_known: bool) -> None:
+        self.deleted_crossings.append(
+            DeletedCrossing(source, external, edge_type, direction, external_known))
+
+
+def compose(lower: "Provenance", upper: "Provenance",
+            lower_rule: RuleId | None = None) -> str:
+    """How an upper layer relates to a lower one's output. Sven, 2026-08-22.
+
+        touched(upper) versus result_nodes(lower):
+            empty intersection      -> 'disjoint'
+            subset of lower's output-> 'contained'   (equal: 'transitive')
+            reaches outside         -> 'side_effects'
+
+    disjoint     : the upper layer never touched the lower one's output, so the
+                   lower layer stays independently reversible.
+    contained    : the upper layer stayed inside the lower rule's radius. Sven,
+                   2026-08-24, correcting his own earlier 'fewer OR more'
+                   condition: FEWER is harmless -- as long as everything stays
+                   within the first rule's radius, reversing the lower layer
+                   still only concerns nodes between its own input and output.
+                   'transitive' is the special case touched == output exactly,
+                   where the two reverse as a unit, first input to last output.
+    side_effects : the upper layer touched nodes OUTSIDE the lower one's output.
+                   Only this direction breaks reversal, because undoing the
+                   lower layer would then have to touch nodes outside its own
+                   input and output.
+
+    NOTE this is a property of the SEQUENCE, not of a rule. The same rule is
+    provenance-preserving after one neighbour and destructive after another --
+    which is why this is not a flag on a rule group.
+    """
+    lower_out = (lower.result_nodes_of(lower_rule) if lower_rule is not None
+                 else lower.result_nodes())
+    if not lower_out:
+        return "side_effects"
+    up = upper.touched_sources()
+    hit = up & lower_out
+    if not hit:
+        return "disjoint"
+    if not (up <= lower_out):
+        return "side_effects"
+    return "transitive" if up == lower_out else "contained"
 
 
 @dataclass

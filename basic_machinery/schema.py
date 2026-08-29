@@ -819,17 +819,36 @@ def _compound_provenance(operation, binding: dict, output_map: dict, forced_inpu
     """Like provenance_from_schema, but any inherit input in `forced_inputs`
     (this firing's forced-born override) is recorded as BORN, not MAPPED --
     its fresh identity has no source; the original real id's provenance
-    continues through whichever match actually won it."""
+    continues through whichever match actually won it.
+
+    2026-08-22: every entry now carries `rule` and `touched`, because
+    provenance has a second consumer (downward travel) that must know WHICH
+    rule produced a node and whether the node was actually changed. See
+    ProvenanceEntry in layers.py for why neither is optional.
+    """
     from basic_machinery.layers import Provenance, Disposition
     core = operation.schema.core
     prov = Provenance()
+    rule = getattr(operation, 'name', None)
+
+    # A node is UNTOUCHED when it is carried through identically: it inherits
+    # 1:1, gains no incoming mapping, and is not deleted. Such nodes stay
+    # reversible even if a later layer matched across them, which is exactly
+    # what the composition test needs to see.
+    def _untouched(out_node, in_node) -> bool:
+        if in_node in core.delete:
+            return False
+        extra = [s for s in core.mapping_in.get(out_node, ()) if s is not in_node]
+        return not extra
 
     for out_node, in_node in core.inherit.items():
         if in_node in forced_inputs:
-            prov.add(source=None, result=output_map[out_node], disposition=Disposition.BORN)
+            prov.add(source=None, result=output_map[out_node],
+                     disposition=Disposition.BORN, rule=rule, touched=True)
         else:
             prov.add(source=binding[in_node], result=output_map[out_node],
-                     disposition=Disposition.MAPPED)
+                     disposition=Disposition.MAPPED, rule=rule,
+                     touched=not _untouched(out_node, in_node))
 
     for out_node, srcs in core.mapping_in.items():
         identity_src = core.inherit.get(out_node)
@@ -839,13 +858,15 @@ def _compound_provenance(operation, binding: dict, output_map: dict, forced_inpu
             if in_node in core.delete:
                 continue
             prov.add(source=binding[in_node], result=output_map[out_node],
-                     disposition=Disposition.INHERITED)
+                     disposition=Disposition.INHERITED, rule=rule, touched=True)
 
     for in_node in core.delete:
-        prov.add(source=binding[in_node], result=None, disposition=Disposition.CONSUMED)
+        prov.add(source=binding[in_node], result=None,
+                 disposition=Disposition.CONSUMED, rule=rule, touched=True)
 
     for out_node in core.born:
-        prov.add(source=None, result=output_map[out_node], disposition=Disposition.BORN)
+        prov.add(source=None, result=output_map[out_node],
+                 disposition=Disposition.BORN, rule=rule, touched=True)
 
     return prov
 
@@ -1045,6 +1066,30 @@ def apply_compound(lg, registry, base_layer, new_layer, matches: list) -> dict:
     for i, (operation, binding) in enumerate(matches):
         piece = _compound_provenance(operation, binding, output_maps[i], forced_born.get(i, set()))
         prov.entries.extend(piece.entries)
+
+    # --- deleted boundary crossings (2026-08-22) --------------------------
+    # A consumed node's edges to nodes OUTSIDE the rewritten region vanish with
+    # it, and node-only provenance could not even detect that. Recording them
+    # turns a silent, unreconstructible loss into a stated one: `external_known`
+    # says whether the far end still exists at the new layer, which is the
+    # difference between 'the descent can rebuild this' and 'the descent ends
+    # here'. Nothing else in the pass changes -- this only stops discarding.
+    for node in consumed:
+        for e in lg.edges_of(node, base_layer):
+            if e.source == node and e.target == node:
+                continue
+            if e.source == node:
+                other, direction = e.target, 'out'
+            elif e.target == node:
+                other, direction = e.source, 'in'
+            else:
+                continue
+            if other in consumed:
+                continue                      # both ends gone: not a crossing
+            prov.add_deleted_crossing(
+                source=node, external=other,
+                edge_type=getattr(e, 'edge_type', None), direction=direction,
+                external_known=(other in present))
 
     registry.add(LayerRecord(
         key=new_layer, travel_type=TravelType.UPWARD,
